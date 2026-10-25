@@ -1,0 +1,341 @@
+/* glass-ui design system: the shared glass look (fonts, base, menu, modal,
+   glass shapes). Import once from an app root:
+     import "glass-ui/styles.css";
+   Font URLs are relative to this file — Vite/webpack resolve and hash them
+   out of the installed package automatically. */
+
+/* SF Pro Display — every variant shipped in fonts/SF. */
+@font-face {
+  font-family: "SF Pro Display";
+  src: url("./fonts/SF/SFPRODISPLAYTHINITALIC.OTF") format("opentype");
+  font-weight: 100;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "SF Pro Display";
+  src: url("./fonts/SF/SFPRODISPLAYULTRALIGHTITALIC.OTF") format("opentype");
+  font-weight: 200;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "SF Pro Display";
+  src: url("./fonts/SF/SFPRODISPLAYLIGHTITALIC.OTF") format("opentype");
+  font-weight: 300;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "SF Pro Display";
+  src: url("./fonts/SF/SFPRODISPLAYREGULAR.OTF") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "SF Pro Display";
+  src: url("./fonts/SF/SFPRODISPLAYMEDIUM.OTF") format("opentype");
+  font-weight: 500;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "SF Pro Display";
+  src: url("./fonts/SF/SFPRODISPLAYSEMIBOLDITALIC.OTF") format("opentype");
+  font-weight: 600;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "SF Pro Display";
+  src: url("./fonts/SF/SFPRODISPLAYBOLD.OTF") format("opentype");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "SF Pro Display";
+  src: url("./fonts/SF/SFPRODISPLAYHEAVYITALIC.OTF") format("opentype");
+  font-weight: 800;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "SF Pro Display";
+  src: url("./fonts/SF/SFPRODISPLAYBLACKITALIC.OTF") format("opentype");
+  font-weight: 900;
+  font-style: italic;
+}
+
+/* Glass app base: transparent full-bleed document over the GPU surfaces. */
+:root {
+  color: #f7f9ff;
+  background: transparent;
+  font-family: "SF Pro Display", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent !important;
+}
+
+button {
+  font: inherit;
+}
+
+.boot-surface {
+  width: 100%;
+  height: 100%;
+}
+
+.glass-filter-definitions {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* Radix dropdown/popover content positioned above the native glass. */
+.liquid-menu-content {
+  padding: 6px;
+  color: #f7f9ff;
+}
+
+/* Generic modal (Modal.tsx): dims its container and floats a centered card
+   over it. The container (.cc-content or an app equivalent) is the
+   positioning parent. */
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  border-radius: 22px;
+  background: rgba(8, 10, 14, 0.45);
+}
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(36, 38, 42, 0.97);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+}
+
+.modal-title {
+  font-size: 13px;
+  font-weight: 700;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.modal-input {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.modal-input:focus {
+  border-color: rgba(58, 155, 255, 0.7);
+}
+
+/* The password row: input plus the app's own show/hide eye — the native
+   WebView2 reveal button is suppressed and the app's is plain foreground. */
+.modal-password-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.modal-password-row .modal-input {
+  padding-right: 32px;
+}
+
+.modal-password-row .modal-input::-ms-reveal,
+.modal-password-row .modal-input::-ms-clear {
+  display: none;
+}
+
+.modal-eye {
+  position: absolute;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  outline: none;
+}
+
+.modal-eye:hover {
+  background: rgba(127, 127, 127, 0.2);
+}
+
+.modal-error {
+  font-size: 11px;
+  line-height: 1.4;
+  color: #ff9d9d;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modal-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+}
+
+.modal-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.modal-primary {
+  background: #0a84ff;
+  color: #fff;
+}
+
+/* A glass card (GlassCard.tsx): the native surface provides the material and
+   its own edge — no CSS fill. Roundness comes from one of the shape classes
+   below. */
+.cc-card {
+  color: #f7f9ff;
+  outline: none;
+}
+
+/* Fade transitions (transition="fade"/"glass-fade"): the wrapped content
+   starts invisible and eases in over the glass. */
+[data-liquid-glass-surface] {
+  transition: opacity 160ms ease;
+}
+
+[data-liquid-glass-surface][data-glass-hidden="true"] {
+  opacity: 0;
+}
+
+/* Roundness types: pill = fully rounded, container = partially rounded,
+   circle = completely rounded (on a square box). */
+.cc-shape-pill {
+  border-radius: 999px;
+}
+
+.cc-shape-container {
+  border-radius: 22px;
+}
+
+.cc-shape-circle {
+  aspect-ratio: 1;
+  border-radius: 50%;
+}
+
+/* Dropdown menu items (LiquidMenuItems.tsx). */
+.liquid-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 12px;
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+  /* Sequential entrance: each item fades in with its per-index
+     animationDelay (set inline by LiquidMenuItems). */
+  animation: menu-item-fade 180ms cubic-bezier(0.19, 1, 0.22, 1) both;
+}
+
+@keyframes menu-item-fade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.menu-item-fade {
+  animation: menu-item-fade 180ms cubic-bezier(0.19, 1, 0.22, 1) both;
+}
+
+.liquid-menu-item[data-highlighted] {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
+.liquid-menu-item[data-disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.liquid-menu-indicator {
+  width: 14px;
+  text-align: center;
+}
+
+/* Horizontal rule inside a dropdown. */
+.liquid-menu-divider {
+  height: 1px;
+  margin: 5px 8px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* Long labels (app window titles) truncate instead of widening the menu. */
+.liquid-menu-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

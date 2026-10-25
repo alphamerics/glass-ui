@@ -1,0 +1,25 @@
+[package]
+name = "glass-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Reusable native menu-glass manager for liquid-glass Tauri apps: per-key glass surfaces, recycle pool, group reveals, springs and hit rects"
+license = "MIT"
+
+[lib]
+name = "glass_ui"
+
+[features]
+# The optional Tauri command surface (#[tauri::command] wrappers over the
+# manager). Apps using Tauri enable this; the core stays Tauri-free.
+default = []
+tauri = ["dep:tauri"]
+
+[dependencies]
+liquid-glass = { git = "https://github.com/alphamerics/liquid-glass" }
+serde = { version = "1", features = ["derive"] }
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging",
+] }
+tauri = { version = "2", optional = true, default-features = false, features = ["wry"] }

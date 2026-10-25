@@ -1,0 +1,6 @@
+# Workspace shim: the glass-ui repo root exists so a cargo **git dependency**
+# (`glass-ui = { git = "https://github.com/alphamerics/glass-ui" }`) can resolve
+# the `glass-ui` package by name. The crate itself lives in `native/`.
+[workspace]
+members = ["native"]
+resolver = "2"
