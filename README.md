@@ -82,9 +82,12 @@ glass will be wrong (refracting its own DOM, mis-scaled, or absent):
    `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`, and set
    `WS_EX_LAYERED` on the window (what lets cross-thread click-through work
    for shell overlays).
-4. **Ship `glass-broker.exe` beside the app executable** — build the broker
-   bin before the app (see an app's `tauri.conf.json`
-   `beforeDevCommand`/`beforeBuildCommand`) and bundle it:
+4. **Ship `glass-broker.exe` beside the app executable** — the broker bin
+   must exist next to the app at runtime. Apps that embed their own
+   broker trampoline as a `[[bin]]` target get it for free: Tauri
+   automatically bundles every bin target beside the executable (build it
+   first in `beforeDevCommand`/`beforeBuildCommand`, like Glassbar does).
+   Apps consuming the library differently bundle it explicitly:
 
    ```jsonc
    "bundle": { "resources": { "target/release/glass-broker.exe": "glass-broker.exe" } }
