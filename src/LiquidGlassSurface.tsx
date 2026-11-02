@@ -4,6 +4,7 @@ import {
   positionMenuGlass,
   syncMenuGlasses,
 } from "./bridge";
+import { onDomMutations } from "./domWatch";
 
 const DEFAULT_RADIUS_PX = 20;
 const TRACK_INTERVAL_MS = 120;
@@ -24,6 +25,11 @@ function registerGlassKey(key: string): void {
   if (!sweepStarted) {
     sweepStarted = true;
     window.setInterval(() => {
+      // An empty registry has nothing to reconcile: skip the IPC instead of
+      // sending one sync per second for the page's lifetime.
+      if (activeGlassKeys.size === 0) {
+        return;
+      }
       void syncMenuGlasses([...activeGlassKeys]);
     }, SWEEP_INTERVAL_MS);
   }
@@ -146,16 +152,17 @@ export function useLiquidGlassSurface(
       });
     };
     pushSettled();
-    // MutationObserver syncs the glass with the web UI the moment the
-    // element mounts; the interval covers later reflows as a fallback.
-    const observer = new MutationObserver(pushSettled);
-    observer.observe(document.body, { childList: true, subtree: true });
+    // The shared DOM lane (one body-subtree observer for every consumer in
+    // the app, with its own double-rAF settle) syncs the glass with the web
+    // UI the moment the element mounts; the interval covers later reflows
+    // as a fallback.
+    const unsubscribe = onDomMutations(push);
     const timer = window.setInterval(push, TRACK_INTERVAL_MS);
     return () => {
       if (frame) {
         cancelAnimationFrame(frame);
       }
-      observer.disconnect();
+      unsubscribe();
       window.clearInterval(timer);
       unregisterGlassKey(key);
       void positionMenuGlass(key, null);

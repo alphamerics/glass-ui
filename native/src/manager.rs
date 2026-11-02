@@ -7,7 +7,7 @@
 //! call), the seed shader params (app-provided; the shared global material
 //! is merged on top at spawn time) and, optionally, a group-ready emitter.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use liquid_glass::{
@@ -73,13 +73,26 @@ fn seed_surface(
 
 /// See [`MenuGlassManager::pending_group`].
 struct PendingGroup {
-    /// Keys whose surfaces are still waiting to be revealed.
-    keys: HashSet<String>,
+    /// Keys whose surfaces are still waiting to be revealed, in
+    /// registration order (the stagger releases them in this order).
+    keys: Vec<String>,
     /// The watcher stops waiting past this point and reveals whatever is
     /// ready (a surface whose capture session is very slow should not block
     /// the group forever).
     deadline: std::time::Instant,
+    /// Members already released to their reveal.
+    released: usize,
+    /// When the last member was released (the stagger's cadence clock).
+    last_release: Option<std::time::Instant>,
 }
+
+/// The stagger between grouped reveal releases. Revealing every member on
+/// the same tick is the engine's peak GPU moment — several large panels
+/// animating noise fields simultaneously saturates integrated GPUs hard
+/// enough to trigger driver resets. A 35 ms cadence flattens the spike
+/// while staying well inside the content fade, so the group still reads as
+/// one reveal.
+const GROUP_STAGGER: std::time::Duration = std::time::Duration::from_millis(35);
 
 /// The live squash/stretch state of the menu scale spring. The scale is
 /// anchored to the surface's bottom-center in the shader (x overshoots with
@@ -336,14 +349,16 @@ impl MenuGlassManager {
             .expect("pending group lock poisoned");
         match pending.as_mut() {
             Some(existing) => {
-                existing.keys.insert(key.to_owned());
+                existing.keys.push(key.to_owned());
             }
             None => {
                 *pending = Some(PendingGroup {
-                    keys: HashSet::from([key.to_owned()]),
+                    keys: vec![key.to_owned()],
                     // A capture session that never warms up must not block
                     // the group forever.
                     deadline: std::time::Instant::now() + std::time::Duration::from_millis(2500),
+                    released: 0,
+                    last_release: None,
                 });
             }
         }
@@ -356,7 +371,7 @@ impl MenuGlassManager {
             .lock()
             .expect("pending group lock poisoned");
         if let Some(group) = pending.as_mut() {
-            group.keys.remove(key);
+            group.keys.retain(|existing| existing != key);
         }
     }
 
@@ -365,7 +380,7 @@ impl MenuGlassManager {
             .lock()
             .expect("pending group lock poisoned")
             .as_ref()
-            .is_some_and(|group| group.keys.contains(key))
+            .is_some_and(|group| group.keys.iter().any(|existing| existing == key))
     }
 
     /// Called each host-app tick: reveals the whole pending group the moment
@@ -373,13 +388,13 @@ impl MenuGlassManager {
     /// passes), so grouped glass appears in a single instant. Also fires the
     /// group emitter so the web UI can fade its content in with the glass.
     pub fn check_pending_group(&self) {
-        let (group_keys, deadline) = {
+        let (group_keys, deadline, mut released, mut last_release) = {
             let guard = self
                 .pending_group
                 .lock()
                 .expect("pending group lock poisoned");
             match guard.as_ref() {
-                Some(group) => (group.keys.clone(), group.deadline),
+                Some(group) => (group.keys.clone(), group.deadline, group.released, group.last_release),
                 None => return,
             }
         };
@@ -389,7 +404,7 @@ impl MenuGlassManager {
                 .glasses
                 .lock()
                 .expect("menu glasses lock poisoned");
-            for key in &group_keys {
+            for key in &group_keys[released.min(group_keys.len())..] {
                 let presented = glasses
                     .get_mut(key)
                     // A member that was closed meanwhile does not block.
@@ -404,25 +419,57 @@ impl MenuGlassManager {
         if !all_ready && std::time::Instant::now() < deadline {
             return;
         }
+        // Release members one at a time on the stagger cadence (a member
+        // closed meanwhile is skipped without counting against the pace).
+        let now = std::time::Instant::now();
+        let deadline_passed = now >= deadline;
+        if let Some(last) = last_release {
+            if now.duration_since(last) < GROUP_STAGGER {
+                return;
+            }
+        }
         {
             let mut glasses = self
                 .glasses
                 .lock()
                 .expect("menu glasses lock poisoned");
-            for key in &group_keys {
+            while released < group_keys.len() {
+                let key = &group_keys[released];
+                released += 1;
+                last_release = Some(now);
                 if let Some(glass) = glasses.get_mut(key) {
                     // Resume rendering right as the reveal starts.
                     glass.surface.set_paused(false);
                     glass.surface.set_reveal(true, MENU_REVEAL_INSTANT);
                 }
+                // The web UI's content fade fires with the FIRST release so
+                // its eases ride the staggered reveals.
+                if released == 1 {
+                    if let Some(emit) =
+                        self.emitter.lock().expect("emitter lock poisoned").as_ref()
+                    {
+                        emit();
+                    }
+                }
+                // One release per tick: the next member goes on a later
+                // tick (the caller polls this on its supervision loop).
+                break;
             }
         }
-        *self
-            .pending_group
-            .lock()
-            .expect("pending group lock poisoned") = None;
-        if let Some(emit) = self.emitter.lock().expect("emitter lock poisoned").as_ref() {
-            emit();
+        if released >= group_keys.len() || deadline_passed {
+            *self
+                .pending_group
+                .lock()
+                .expect("pending group lock poisoned") = None;
+        } else {
+            let mut guard = self
+                .pending_group
+                .lock()
+                .expect("pending group lock poisoned");
+            if let Some(group) = guard.as_mut() {
+                group.released = released;
+                group.last_release = last_release;
+            }
         }
     }
 

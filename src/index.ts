@@ -30,3 +30,4 @@ export {
   logUi,
 } from "./bridge";
 export type { MenuGlassRect } from "./bridge";
+export { onDomMutations } from "./domWatch";

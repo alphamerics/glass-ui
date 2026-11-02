@@ -101,13 +101,6 @@ button {
   height: 100%;
 }
 
-.glass-filter-definitions {
-  position: absolute;
-  width: 0;
-  height: 0;
-  overflow: hidden;
-}
-
 /* Radix dropdown/popover content positioned above the native glass. */
 .liquid-menu-content {
   padding: 6px;
