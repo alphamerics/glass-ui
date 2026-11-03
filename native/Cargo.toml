@@ -15,7 +15,7 @@ default = []
 tauri = ["dep:tauri"]
 
 [dependencies]
-liquid-glass = { git = "https://github.com/alphamerics/liquid-glass" }
+liquid-glass = { path = "../../liquid-glass" }
 serde = { version = "1", features = ["derive"] }
 windows = { version = "0.58", features = [
   "Win32_Foundation",

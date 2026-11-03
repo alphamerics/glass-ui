@@ -1,7 +1,7 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { ReactNode } from "react";
 import { useId } from "react";
-import { useLiquidGlassSurface } from "./LiquidGlassSurface";
+import { useLiquidGlassSurface, type GlassBackdrop } from "./LiquidGlassSurface";
 import { LiquidMenuItems, type LiquidMenuItem } from "./LiquidMenuItems";
 
 export type LiquidDropdownItem = LiquidMenuItem;
@@ -16,6 +16,10 @@ interface LiquidDropdownProps {
   borderRadius?: number;
   /** The glass plays the scale-up spring instead of the wobble. */
   spring?: boolean;
+  /** Which feed paints the backdrop (see [`GlassBackdrop`]): the shared
+   * monitor capture (the default) or the host window's own capture for
+   * in-app glass. */
+  backdrop?: GlassBackdrop;
 }
 
 export function LiquidDropdown({
@@ -27,6 +31,7 @@ export function LiquidDropdown({
   width = 250,
   borderRadius = 20,
   spring = false,
+  backdrop,
 }: LiquidDropdownProps) {
   // Each dropdown instance owns its own native glass instance, tracked via a
   // per-instance attribute selector so overlapping menus never cross-track.
@@ -39,6 +44,7 @@ export function LiquidDropdown({
     undefined,
     undefined,
     spring,
+    backdrop,
   );
 
   return (

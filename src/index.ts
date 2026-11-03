@@ -14,7 +14,7 @@
  *   3. Ship a glass-broker.exe beside the app executable.
  */
 export { LiquidGlassSurface, useLiquidGlassSurface } from "./LiquidGlassSurface";
-export type { GlassTransition } from "./LiquidGlassSurface";
+export type { GlassTransition, GlassBackdrop } from "./LiquidGlassSurface";
 export { LiquidDropdown } from "./LiquidDropdown";
 export type { LiquidDropdownItem } from "./LiquidDropdown";
 export { LiquidMenuItems } from "./LiquidMenuItems";

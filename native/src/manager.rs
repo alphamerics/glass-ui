@@ -33,6 +33,11 @@ struct MenuGlass {
     /// Fade-style reveal (`glass_fade` = 1 in the surface's params); tracked
     /// so surfaces recycled between the two styles get re-seeded.
     fade: bool,
+    /// Which feed paints this surface (see [`liquid_glass::BackdropSource`]):
+    /// the global monitor capture, or a local per-window capture of the
+    /// host app's own content. Recycled surfaces only ever re-enter menus
+    /// of their own kind.
+    local: bool,
 }
 
 /// The shader's edge band and outline are proportional to the surface
@@ -292,28 +297,23 @@ impl MenuGlassManager {
     /// instead of paying the create-and-warmup cost while the user is
     /// already looking at the panel. Called when the user merely hovers the
     /// trigger, buying the warmup time before the click.
-    pub fn prewarm(&self, overlay: HWND, count: usize) -> Result<(), String> {
+    pub fn prewarm(&self, overlay: HWND, count: usize, local: bool) -> Result<(), String> {
         let mut recycled = self
             .recycled
             .lock()
             .expect("recycled glasses lock poisoned");
         let room = RECYCLE_POOL_MAX.saturating_sub(recycled.len());
         for _ in 0..count.min(room) {
-            let config = GlassConfig {
-                corner_radius_px: 20.0,
-                surface_anchor: SurfaceAnchor::Rect {
+            let config = Self::menu_config(
+                20.0,
+                SurfaceAnchor::Rect {
                     offset_x: 0.0,
                     offset_y: 0.0,
                     width: 1.0,
                     height: 1.0,
                 },
-                // The app's own persistent surface already styled the host
-                // overlay; re-styling it on every spawn would burn
-                // SetWindowLong / DwmSetWindowAttribute / SetWindowPos churn
-                // per card.
-                style_host_window: false,
-                ..Default::default()
-            };
+                local,
+            );
             match GlassSurface::create(overlay.0 as isize, config) {
                 Ok(mut surface) => {
                     let _ = surface.set_shader_params_keeping_corner(
@@ -330,6 +330,7 @@ impl MenuGlassManager {
                         radius: 20.0,
                         small: false,
                         fade: false,
+                        local,
                     });
                 }
                 Err(error) => {
@@ -339,6 +340,34 @@ impl MenuGlassManager {
             }
         }
         Ok(())
+    }
+
+    /// The creation config for one menu glass surface. Global surfaces keep
+    /// the Glassbar overlay sandwich (beneath a transparent host, excluded
+    /// from captures); local surfaces are in-app glass stacked above the
+    /// host's own content, fed by that window's local feed — and may stay
+    /// visible to screen recorders, since their window capture excludes
+    /// overlapping windows on its own.
+    fn menu_config(radius: f32, anchor: SurfaceAnchor, local: bool) -> GlassConfig {
+        GlassConfig {
+            corner_radius_px: radius,
+            surface_anchor: anchor,
+            // The app's own persistent surface already styled the host
+            // overlay; menu spawns must not re-style it.
+            style_host_window: false,
+            backdrop_source: if local {
+                liquid_glass::BackdropSource::Local
+            } else {
+                liquid_glass::BackdropSource::Global
+            },
+            placement: if local {
+                liquid_glass::SurfacePlacement::AboveHost
+            } else {
+                liquid_glass::SurfacePlacement::BeneathHost
+            },
+            exclude_from_capture: !local,
+            ..Default::default()
+        }
     }
 
     /// Registers a freshly created surface in the pending reveal group.
@@ -484,7 +513,8 @@ impl MenuGlassManager {
     /// together pop in at once. `glass_fade` goes further: the reveal
     /// animation is disabled entirely and the glass itself dissolves in with
     /// an opacity fade. `spring` plays the scale-up bounce instead of the
-    /// wobble reveal.
+    /// wobble reveal. `local` feeds the surface from its host window's own
+    /// capture instead of the shared monitor capture (in-app glass).
     pub fn position_menu_glass(
         &self,
         overlay: HWND,
@@ -495,6 +525,7 @@ impl MenuGlassManager {
         glass_fade: bool,
         group: Option<&str>,
         spring: bool,
+        local: bool,
     ) -> Result<(), String> {
         let reveal = if glass_fade {
             MENU_GLASS_FADE
@@ -546,7 +577,26 @@ impl MenuGlassManager {
                 return Ok(());
             }
             Some(rect) => {
-                if let Some(glass) = glasses.get_mut(key) {
+            // A surface switching feeds (global ↔ local) cannot be
+            // re-anchored into a different capture pipeline: park it and
+            // let the creation path below build the right kind.
+            if glasses
+                .get(key)
+                .map_or(false, |glass| glass.local != local)
+            {
+                if let Some(mut glass) = glasses.remove(key) {
+                    glass.surface.set_reveal(false, close_reveal);
+                    glass.surface.collapse_then_pause();
+                    let mut recycled = self
+                        .recycled
+                        .lock()
+                        .expect("recycled glasses lock poisoned");
+                    if recycled.len() < RECYCLE_POOL_MAX {
+                        recycled.push(glass);
+                    }
+                }
+            }
+            if let Some(glass) = glasses.get_mut(key) {
                     let moved = !glass
                         .rect
                         .iter()
@@ -593,79 +643,86 @@ impl MenuGlassManager {
                 // Prefer a warm, collapsed surface from the recycle pool: it
                 // re-anchors instantly, while a fresh capture session needs
                 // hundreds of milliseconds before its first frame arrives.
-                let mut glass = match self
-                    .recycled
-                    .lock()
-                    .expect("recycled glasses lock poisoned")
-                    .pop()
-                {
-                    Some(mut recycled) => {
-                        recycled
-                            .surface
-                            .set_anchor(SurfaceAnchor::Rect {
-                                offset_x: rect[0],
-                                offset_y: rect[1],
-                                width: rect[2],
-                                height: rect[3],
-                            })
-                            .map_err(|error| {
-                                eprintln!("glass-ui menu glass re-anchor failed: {error}");
-                                error
-                            })
-                            .ok();
-                        // Back from the pool: resume rendering.
-                        recycled.surface.set_paused(false);
-                        recycled
-                    }
-                    None => {
-                        let config = GlassConfig {
-                            corner_radius_px: radius,
-                            surface_anchor: SurfaceAnchor::Rect {
-                                offset_x: rect[0],
-                                offset_y: rect[1],
-                                width: rect[2],
-                                height: rect[3],
-                            },
-                            // The app's own persistent surface already
-                            // styled the host overlay; menu spawns must not
-                            // re-style it.
-                            style_host_window: false,
-                            ..Default::default()
-                        };
-                        let mut surface = match GlassSurface::create(overlay.0 as isize, config) {
-                            Ok(surface) => surface,
-                            Err(error) => {
-                                eprintln!("glass-ui menu glass failed: {error}");
-                                return Err(error);
+                // Only surfaces of the SAME feed kind are reusable — a
+                // global surface must never be re-anchored into the local
+                // pipeline or vice versa.
+                let mut glass = {
+                    let mut recycled = self
+                        .recycled
+                        .lock()
+                        .expect("recycled glasses lock poisoned");
+                    let match_index = recycled
+                        .iter()
+                        .rposition(|pooled| pooled.local == local);
+                    let pooled = match_index.map(|index| recycled.remove(index));
+                    drop(recycled);
+                    match pooled {
+                        Some(mut recycled) => {
+                            recycled
+                                .surface
+                                .set_anchor(SurfaceAnchor::Rect {
+                                    offset_x: rect[0],
+                                    offset_y: rect[1],
+                                    width: rect[2],
+                                    height: rect[3],
+                                })
+                                .map_err(|error| {
+                                    eprintln!("glass-ui menu glass re-anchor failed: {error}");
+                                    error
+                                })
+                                .ok();
+                            // Back from the pool: resume rendering.
+                            recycled.surface.set_paused(false);
+                            recycled
+                        }
+                        None => {
+                            let config = Self::menu_config(
+                                radius,
+                                SurfaceAnchor::Rect {
+                                    offset_x: rect[0],
+                                    offset_y: rect[1],
+                                    width: rect[2],
+                                    height: rect[3],
+                                },
+                                local,
+                            );
+                            let mut surface = match GlassSurface::create(overlay.0 as isize, config)
+                            {
+                                Ok(surface) => surface,
+                                Err(error) => {
+                                    eprintln!("glass-ui menu glass failed: {error}");
+                                    return Err(error);
+                                }
+                            };
+                            let small = group.is_some();
+                            // Seed the fresh surface with the saved glass
+                            // settings (plus this surface's fade style) BEFORE
+                            // the reveal is configured — set_reveal stamps its
+                            // own turbulence/wobble onto the params, and seeding
+                            // afterwards would visibly snap the material as the
+                            // user's values land.
+                            let _ = seed_surface(
+                                &mut surface,
+                                self.seed_params(small, rect[3], glass_fade),
+                                small,
+                            );
+                            // A blurred backdrop does not need full refresh
+                            // rate: cap menu surfaces for content-driven frames
+                            // (reveal animations run at tick rate).
+                            surface.set_frame_cap(Some(60.0));
+                            // Start the reveal immediately with the chosen
+                            // animation; the shader defaults would otherwise
+                            // play the first frames from the wrong corner with
+                            // the wrong turbulence.
+                            surface.set_reveal(true, reveal);
+                            MenuGlass {
+                                surface,
+                                rect,
+                                radius,
+                                small,
+                                fade: glass_fade,
+                                local,
                             }
-                        };
-                        let small = group.is_some();
-                        // Seed the fresh surface with the saved glass
-                        // settings (plus this surface's fade style) BEFORE
-                        // the reveal is configured — set_reveal stamps its
-                        // own turbulence/wobble onto the params, and seeding
-                        // afterwards would visibly snap the material as the
-                        // user's values land.
-                        let _ = seed_surface(
-                            &mut surface,
-                            self.seed_params(small, rect[3], glass_fade),
-                            small,
-                        );
-                        // A blurred backdrop does not need full refresh
-                        // rate: cap menu surfaces for content-driven frames
-                        // (reveal animations run at tick rate).
-                        surface.set_frame_cap(Some(60.0));
-                        // Start the reveal immediately with the chosen
-                        // animation; the shader defaults would otherwise
-                        // play the first frames from the wrong corner with
-                        // the wrong turbulence.
-                        surface.set_reveal(true, reveal);
-                        MenuGlass {
-                            surface,
-                            rect,
-                            radius,
-                            small,
-                            fade: glass_fade,
                         }
                     }
                 };

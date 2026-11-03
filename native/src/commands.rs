@@ -64,21 +64,26 @@ pub fn set_ui_hit_rects(
 
 /// Pre-creates warm menu glass surfaces into the recycle pool so the next
 /// grouped panel opens instantly. Called on trigger hover, buying the
-/// capture-session warmup time before the click.
+/// capture-session warmup time before the click. `local` pre-warms
+/// in-app (local-feed) surfaces instead of the global ones.
 #[tauri::command]
 pub fn prewarm_menu_glass(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, MenuGlassManager>,
     count: usize,
+    local: Option<bool>,
 ) -> Result<(), String> {
     state.prewarm(
         windows::Win32::Foundation::HWND(window.hwnd().map_err(|e| e.to_string())?.0 as *mut _),
         count,
+        local.unwrap_or(false),
     )
 }
 
 /// Renders (or removes) the native liquid glass surface behind a menu. The
 /// rect is in physical pixels relative to the overlay's top-left corner.
+/// `local` feeds the surface from the host window's own capture instead of
+/// the shared monitor capture (in-app glass).
 #[tauri::command]
 pub fn position_menu_glass(
     window: tauri::WebviewWindow,
@@ -90,6 +95,7 @@ pub fn position_menu_glass(
     glass_fade: Option<bool>,
     group: Option<String>,
     spring: Option<bool>,
+    local: Option<bool>,
 ) -> Result<(), String> {
     let rect = rect.map(|r| [r.x as f32, r.y as f32, r.width as f32, r.height as f32]);
     let radius = rect_radius.unwrap_or(20.0) as f32;
@@ -102,6 +108,7 @@ pub fn position_menu_glass(
         glass_fade.unwrap_or(false),
         group.as_deref(),
         spring.unwrap_or(false),
+        local.unwrap_or(false),
     )
 }
 

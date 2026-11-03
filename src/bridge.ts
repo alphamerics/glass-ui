@@ -29,7 +29,10 @@ export async function setUiHitRects(rects: MenuGlassRect[]): Promise<void> {
 /**
  * Renders (or removes, with `rect = null`) the native liquid glass surface
  * behind a menu, keyed by `key`. The rect is in physical pixels relative to
- * the overlay's top-left corner.
+ * the overlay's top-left corner. `local` feeds the surface from the host
+ * window's own capture instead of the shared monitor capture: glass that
+ * only ever sits over the app's own content (an in-app card, control or
+ * panel) needs no screen duplication at all.
  */
 export async function positionMenuGlass(
   key: string,
@@ -38,6 +41,7 @@ export async function positionMenuGlass(
   group?: string,
   glassFade?: boolean,
   spring?: boolean,
+  local?: boolean,
 ): Promise<void> {
   try {
     await invoke("position_menu_glass", {
@@ -50,6 +54,7 @@ export async function positionMenuGlass(
       group: group ?? null,
       glassFade: glassFade ?? false,
       spring: spring ?? false,
+      local: local ?? false,
     });
   } catch {
     // The browser preview does not expose native glass.

@@ -62,6 +62,17 @@ function fadesContent(transition: GlassTransition): boolean {
   return transition === "fade" || transition === "glass-fade";
 }
 
+/** Which feed paints the surface's backdrop:
+ *  - `global` the shared capture of the entire monitor (the default; the
+ *    glass refracts everything on screen),
+ *  - `local`  the host app window's own capture — glass that only ever
+ *    sits over the app's own content needs no screen duplication. */
+export type GlassBackdrop = "global" | "local";
+
+function pushesLocal(backdrop?: GlassBackdrop): boolean {
+  return backdrop === "local";
+}
+
 function pushRect(
   node: HTMLElement,
   radiusPx: number,
@@ -70,6 +81,7 @@ function pushRect(
   group?: string,
   glassFade?: boolean,
   spring?: boolean,
+  local?: boolean,
 ): void {
   const rect = node.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
@@ -86,6 +98,7 @@ function pushRect(
     group,
     glassFade,
     spring,
+    local,
   );
 }
 
@@ -105,8 +118,10 @@ export function useLiquidGlassSurface(
   instant?: boolean,
   transition?: GlassTransition,
   spring?: boolean,
+  backdrop?: GlassBackdrop,
 ): void {
   const resolved = transition ?? (instant ? "instant" : "reveal");
+  const local = pushesLocal(backdrop);
 
   useEffect(() => {
     registerGlassKey(key);
@@ -133,6 +148,7 @@ export function useLiquidGlassSurface(
           undefined,
           isGlassFade(resolved),
           spring,
+          local,
         );
       }
     };
@@ -167,7 +183,7 @@ export function useLiquidGlassSurface(
       unregisterGlassKey(key);
       void positionMenuGlass(key, null);
     };
-  }, [active, selector, radiusPx, key, resolved, spring]);
+  }, [active, selector, radiusPx, key, resolved, spring, local]);
 }
 
 /**
@@ -183,6 +199,7 @@ export function LiquidGlassSurface({
   transition,
   instant,
   group,
+  backdrop,
   children,
 }: {
   className?: string;
@@ -193,10 +210,13 @@ export function LiquidGlassSurface({
   instant?: boolean;
   /** Surfaces sharing a `group` appear together once all are warm. */
   group?: string;
+  /** Which feed paints the backdrop (see [`GlassBackdrop`]). */
+  backdrop?: GlassBackdrop;
   children?: ReactNode;
 }) {
   const surfaceId = useId();
   const resolved = transition ?? (instant ? "instant" : "reveal");
+  const local = pushesLocal(backdrop);
   // Content-fading modes: the content starts invisible and eases in once
   // mounted (the double frame wait guarantees the hidden state paints first).
   const [hidden, setHidden] = useState(fadesContent(resolved));
@@ -234,6 +254,8 @@ export function LiquidGlassSurface({
           pushesInstant(resolved),
           group,
           isGlassFade(resolved),
+          undefined,
+          local,
         );
       }
     };
@@ -253,7 +275,7 @@ export function LiquidGlassSurface({
       // Unused: delete this menu's own glass instance.
       void positionMenuGlass(surfaceId, null);
     };
-  }, [surfaceId, radiusPx, resolved, group]);
+  }, [surfaceId, radiusPx, resolved, group, local]);
 
   return (
     <div

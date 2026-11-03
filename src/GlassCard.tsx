@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import {
   LiquidGlassSurface,
+  type GlassBackdrop,
   type GlassTransition,
 } from "./LiquidGlassSurface";
 
@@ -17,17 +18,21 @@ const SHAPE_CLASS: Record<GlassShape, string> = {
  * A liquid glass container in one of the three roundness types. Each card
  * carries its own native glass surface. By default (`glass-fade`) the native
  * reveal animation is disabled and the glass dissolves in with an opacity
- * fade while the card's content eases in with it.
+ * fade while the card's content eases in with it. `backdrop` selects the
+ * feed: the shared monitor capture (the default) or the host window's own
+ * capture for in-app glass.
  */
 export function GlassCard({
   shape = "container",
   className,
   transition = "glass-fade",
+  backdrop,
   children,
 }: {
   shape?: GlassShape;
   className?: string;
   transition?: GlassTransition;
+  backdrop?: GlassBackdrop;
   children: ReactNode;
 }) {
   return (
@@ -35,6 +40,7 @@ export function GlassCard({
       className={`cc-card ${SHAPE_CLASS[shape]}${className ? ` ${className}` : ""}`}
       radiusPx={shape === "container" ? 22 : 999}
       transition={transition}
+      backdrop={backdrop}
     >
       {children}
     </LiquidGlassSurface>

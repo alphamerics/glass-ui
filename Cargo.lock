@@ -1600,7 +1600,6 @@ dependencies = [
 [[package]]
 name = "liquid-glass"
 version = "0.1.0"
-source = "git+https://github.com/alphamerics/liquid-glass#3d329d70c0697bc91d5c1ecd1ef1030c1418c2bd"
 dependencies = [
  "serde",
  "serde_json",
