@@ -25,6 +25,15 @@ use crate::{MENU_GLASS_FADE, MENU_REVEAL, MENU_REVEAL_INSTANT};
 /// surface while warm capture sessions are reused.
 struct MenuGlass {
     surface: GlassSurface,
+    /// The menu key this instance currently serves (pooled surfaces get
+    /// re-keyed on reuse).
+    key: String,
+    /// The host window this surface was created for. The reconciliation
+    /// sweep is scoped to it: two webview windows share one manager, and
+    /// each runs its own 1 s sweep — without the host scoping, every
+    /// sweep would despawn the OTHER window's glass (a 1 Hz
+    /// despawn/respawn war between the windows).
+    host: isize,
     rect: [f32; 4],
     radius: f32,
     /// Small grouped surfaces tone the shader's height-proportional edge
@@ -36,7 +45,7 @@ struct MenuGlass {
     /// Which feed paints this surface (see [`liquid_glass::BackdropSource`]):
     /// the global monitor capture, or a local per-window capture of the
     /// host app's own content. Recycled surfaces only ever re-enter menus
-    /// of their own kind.
+    /// of their own kind — and their own host window.
     local: bool,
 }
 
@@ -235,7 +244,6 @@ impl MenuGlassManager {
     /// (each keeps its own fade/small derivation).
     pub fn set_params(&self, params: liquid_glass::GlassShaderParams) {
         *self.params.lock().expect("params lock poisoned") = params;
-        let params = params;
         for glass in self
             .glasses
             .lock()
@@ -277,11 +285,10 @@ impl MenuGlassManager {
     /// shared material since our last apply, and a freshly spawned surface
     /// must never come up stale.
     fn seed_params(&self, small: bool, height_px: f32, fade: bool) -> liquid_glass::GlassShaderParams {
-        let mut params = self
+        let mut params = *self
             .params
             .lock()
-            .expect("params lock poisoned")
-            .clone();
+            .expect("params lock poisoned");
         let material = liquid_glass::broker::read_material();
         material.apply_onto(&mut params, 1.0);
         params.glass_fade = if fade { 1.0 } else { 0.0 };
@@ -326,6 +333,8 @@ impl MenuGlassManager {
                     surface.pause_after_next_present();
                     recycled.push(MenuGlass {
                         surface,
+                        key: String::new(),
+                        host: overlay.0 as isize,
                         rect: [0.0, 0.0, 1.0, 1.0],
                         radius: 20.0,
                         small: false,
@@ -462,7 +471,7 @@ impl MenuGlassManager {
                 .glasses
                 .lock()
                 .expect("menu glasses lock poisoned");
-            while released < group_keys.len() {
+            if released < group_keys.len() {
                 let key = &group_keys[released];
                 released += 1;
                 last_release = Some(now);
@@ -482,7 +491,6 @@ impl MenuGlassManager {
                 }
                 // One release per tick: the next member goes on a later
                 // tick (the caller polls this on its supervision loop).
-                break;
             }
         }
         if released >= group_keys.len() || deadline_passed {
@@ -515,6 +523,7 @@ impl MenuGlassManager {
     /// an opacity fade. `spring` plays the scale-up bounce instead of the
     /// wobble reveal. `local` feeds the surface from its host window's own
     /// capture instead of the shared monitor capture (in-app glass).
+    #[allow(clippy::too_many_arguments)]
     pub fn position_menu_glass(
         &self,
         overlay: HWND,
@@ -582,7 +591,7 @@ impl MenuGlassManager {
             // let the creation path below build the right kind.
             if glasses
                 .get(key)
-                .map_or(false, |glass| glass.local != local)
+                .is_some_and(|glass| glass.local != local)
             {
                 if let Some(mut glass) = glasses.remove(key) {
                     glass.surface.set_reveal(false, close_reveal);
@@ -638,22 +647,27 @@ impl MenuGlassManager {
                     if !self.group_member_pending(key) {
                         glass.surface.set_reveal(true, reveal);
                     }
+                    glass.key = key.to_owned();
+                    glass.host = overlay.0 as isize;
                     return Ok(());
                 }
                 // Prefer a warm, collapsed surface from the recycle pool: it
                 // re-anchors instantly, while a fresh capture session needs
                 // hundreds of milliseconds before its first frame arrives.
-                // Only surfaces of the SAME feed kind are reusable — a
-                // global surface must never be re-anchored into the local
-                // pipeline or vice versa.
+                // Only surfaces of the SAME feed kind AND the SAME host
+                // window are reusable — a global surface must never be
+                // re-anchored into the local pipeline or vice versa, and a
+                // surface's DComp target is bound to the window it was
+                // created for.
                 let mut glass = {
                     let mut recycled = self
                         .recycled
                         .lock()
                         .expect("recycled glasses lock poisoned");
+                    let overlay_host = overlay.0 as isize;
                     let match_index = recycled
                         .iter()
-                        .rposition(|pooled| pooled.local == local);
+                        .rposition(|pooled| pooled.local == local && pooled.host == overlay_host);
                     let pooled = match_index.map(|index| recycled.remove(index));
                     drop(recycled);
                     match pooled {
@@ -701,7 +715,7 @@ impl MenuGlassManager {
                             // own turbulence/wobble onto the params, and seeding
                             // afterwards would visibly snap the material as the
                             // user's values land.
-                            let _ = seed_surface(
+                            seed_surface(
                                 &mut surface,
                                 self.seed_params(small, rect[3], glass_fade),
                                 small,
@@ -717,6 +731,8 @@ impl MenuGlassManager {
                             surface.set_reveal(true, reveal);
                             MenuGlass {
                                 surface,
+                                key: key.to_owned(),
+                                host: overlay.0 as isize,
                                 rect,
                                 radius,
                                 small,
@@ -755,6 +771,8 @@ impl MenuGlassManager {
                 }
                 glass.rect = rect;
                 glass.radius = radius;
+                glass.key = key.to_owned();
+                glass.host = overlay.0 as isize;
                 glasses.insert(key.to_owned(), glass);
                 Self::update_hit_rect(overlay, &self.hit_rects, key, &rect);
                 if group.is_some() {
@@ -973,20 +991,26 @@ impl MenuGlassManager {
     }
 
     /// The reconciliation sweep behind the web UI's `sync_menu_glasses`:
-    /// closes every live menu glass whose key the webview no longer tracks.
-    /// This is the hard guarantee that a lost close push can never leave a
-    /// glass visible forever — the webview's active-key registry is the
-    /// source of truth.
-    pub fn sync_glasses(&self, keys: &[String]) {
+    /// closes every live menu glass **of the calling window** (`host`)
+    /// whose key the webview no longer tracks. This is the hard guarantee
+    /// that a lost close push can never leave a glass visible forever —
+    /// the webview's active-key registry is the source of truth.
+    ///
+    /// The host scoping is load-bearing: several webview windows share one
+    /// manager, and each runs its own 1 s sweep. Without the scoping,
+    /// window A's sweep (which only knows A's keys) would despawn window
+    /// B's glass every second — and B's sweep would repay the favor — a
+    /// 1 Hz despawn/respawn war.
+    pub fn sync_glasses(&self, keys: &[String], host: isize) {
         let stale: Vec<String> = {
             let glasses = self
                 .glasses
                 .lock()
                 .expect("menu glasses lock poisoned");
             glasses
-                .keys()
-                .filter(|key| !keys.contains(key))
-                .cloned()
+                .iter()
+                .filter(|(_, glass)| glass.host == host && !keys.contains(&glass.key.clone()))
+                .map(|(key, _)| key.clone())
                 .collect()
         };
         if stale.is_empty() {
