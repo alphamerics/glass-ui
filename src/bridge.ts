@@ -26,13 +26,24 @@ export async function setUiHitRects(rects: MenuGlassRect[]): Promise<void> {
   }
 }
 
+/** A metaball element's field payload: the element's own ball radius plus
+ *  the WHOLE shared field (every metaball element's ball, window-relative
+ *  physical px, each `[x, y, radius, weight]`), so metaball surfaces merge
+ *  with each other. */
+export interface MetaballField {
+  radius: number;
+  balls: Array<[number, number, number, number]>;
+  tension: number;
+}
+
 /**
  * Renders (or removes, with `rect = null`) the native liquid glass surface
  * behind a menu, keyed by `key`. The rect is in physical pixels relative to
  * the overlay's top-left corner. `local` feeds the surface from the host
  * window's own capture instead of the shared monitor capture: glass that
  * only ever sits over the app's own content (an in-app card, control or
- * panel) needs no screen duplication at all.
+ * panel) needs no screen duplication at all. `metaball` renders the surface
+ * as a metaball container instead of the shape preset.
  */
 export async function positionMenuGlass(
   key: string,
@@ -42,6 +53,7 @@ export async function positionMenuGlass(
   glassFade?: boolean,
   spring?: boolean,
   local?: boolean,
+  metaball?: MetaballField,
 ): Promise<void> {
   try {
     await invoke("position_menu_glass", {
@@ -55,6 +67,10 @@ export async function positionMenuGlass(
       glassFade: glassFade ?? false,
       spring: spring ?? false,
       local: local ?? false,
+      metaball: metaball != null,
+      metaballRadius: metaball?.radius ?? null,
+      metaballBalls: metaball?.balls ?? null,
+      metaballTension: metaball?.tension ?? null,
     });
   } catch {
     // The browser preview does not expose native glass.

@@ -84,7 +84,16 @@ pub fn prewarm_menu_glass(
 /// rect is in physical pixels relative to the overlay's top-left corner.
 /// `local` feeds the surface from the host window's own capture instead of
 /// the shared monitor capture (in-app glass).
+///
+/// `metaball` turns the surface into a metaball container: the drawn shape
+/// becomes the shared metaball field instead of the shape preset.
+/// `metaball_balls` carries the WHOLE field (every metaball element's ball,
+/// window-relative physical px, each `(x, y, radius, weight)`) so metaball
+/// containers merge with each other; `metaball_radius` is this element's own
+/// ball radius (the anchored element may be a tiny dot) and
+/// `metaball_tension` the field's merge exponent (2 = the classic blend).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn position_menu_glass(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, MenuGlassManager>,
@@ -96,9 +105,18 @@ pub fn position_menu_glass(
     group: Option<String>,
     spring: Option<bool>,
     local: Option<bool>,
+    metaball: Option<bool>,
+    metaball_radius: Option<f64>,
+    metaball_balls: Option<Vec<[f64; 4]>>,
+    metaball_tension: Option<f64>,
 ) -> Result<(), String> {
     let rect = rect.map(|r| [r.x as f32, r.y as f32, r.width as f32, r.height as f32]);
     let radius = rect_radius.unwrap_or(20.0) as f32;
+    let metaball = metaball.unwrap_or(false).then(|| crate::MetaballPush {
+        ball_radius: metaball_radius.unwrap_or(24.0) as f32,
+        balls: metaball_balls.unwrap_or_default(),
+        tension: metaball_tension.unwrap_or(2.0) as f32,
+    });
     state.position_menu_glass(
         windows::Win32::Foundation::HWND(window.hwnd().map_err(|e| e.to_string())?.0 as *mut _),
         &key,
@@ -109,6 +127,7 @@ pub fn position_menu_glass(
         group.as_deref(),
         spring.unwrap_or(false),
         local.unwrap_or(false),
+        metaball,
     )
 }
 
@@ -123,10 +142,7 @@ pub fn sync_menu_glasses(
     state: tauri::State<'_, MenuGlassManager>,
     keys: Vec<String>,
 ) {
-    let host = window
-        .hwnd()
-        .map(|hwnd| hwnd.0 as isize)
-        .unwrap_or(0);
+    let host = window.hwnd().map(|hwnd| hwnd.0 as isize).unwrap_or(0);
     state.sync_glasses(&keys, host);
 }
 

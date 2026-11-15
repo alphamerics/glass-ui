@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use liquid_glass::{
-    translate_compositor, translate_surface_window, GlassConfig, GlassSurface,
-    SharedCompositor, SurfaceAnchor,
+    translate_compositor, translate_surface_window, GlassConfig, GlassSurface, SharedCompositor,
+    SurfaceAnchor,
 };
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
@@ -35,6 +35,10 @@ struct MenuGlass {
     /// despawn/respawn war between the windows).
     host: isize,
     rect: [f32; 4],
+    /// The rect the SURFACE window actually covers: the element's rect,
+    /// except for metaball surfaces whose canvas extends beyond the tiny
+    /// anchored element (see [`metaball_canvas`]).
+    canvas: [f32; 4],
     radius: f32,
     /// Small grouped surfaces tone the shader's height-proportional edge
     /// band and outline down — see [`small_surface_params`].
@@ -47,6 +51,125 @@ struct MenuGlass {
     /// host app's own content. Recycled surfaces only ever re-enter menus
     /// of their own kind — and their own host window.
     local: bool,
+    /// Metaball state: when set, the surface draws a metaball field instead
+    /// of its shape preset. The field is SHARED between every metaball
+    /// element of the window (the web UI pushes the full ball set with each
+    /// element's push), so metaball containers merge with each other — and
+    /// only with each other — while plain shapes stay plain.
+    metaball: Option<MetaballFieldState>,
+    /// The metaball FIELD GENERATION this surface's field copy belongs to.
+    /// Every metaball push carries the whole shared field, so all of the
+    /// host's metaball surfaces advance one generation per field change —
+    /// each in its own (separately queued) push. The present-sync gate uses
+    /// the per-surface generation to hold a just-updated surface's present
+    /// back until every sibling holds the same generation's field, so the
+    /// shared blob's territory halves always compose from the SAME field
+    /// (a loop tick between two sibling pushes would otherwise present one
+    /// new half against an old one, opening a mid-frame gap in the neck).
+    metaball_generation: u64,
+}
+
+/// One metaball surface's field state, deduplicated against incoming pushes.
+#[derive(Clone, PartialEq)]
+struct MetaballFieldState {
+    /// The element's own ball radius (physical px) — the element itself may
+    /// be a tiny anchor dot far smaller than its blob.
+    ball_radius: f32,
+    /// The full shared field: every metaball element's ball, in
+    /// window-relative physical pixels (x, y, radius, weight).
+    balls: Vec<[f32; 4]>,
+    /// The field's tension exponent (2 = the classic blend).
+    tension: f32,
+}
+
+/// How far a metaball surface's canvas extends beyond its anchored element:
+/// the ball's own radius (the blob must render around the tiny element that
+/// anchors it) plus slack for the merged neck reaching toward neighbor
+/// balls. Neighbor canvases overlap across this slack, so together they
+/// cover the whole merged silhouette.
+const METABALL_CANVAS_SLACK_PX: f32 = 48.0;
+
+/// How long the present-sync gate holds a just-updated metaball surface
+/// back from presenting when a sibling still shows the previous field
+/// generation. Normally the siblings' same-generation pushes arrive
+/// microseconds later (every metaball element pushes the whole shared
+/// field whenever any ball moves) and release the gate in the same event
+/// pump; the deadline is the safety net for a lost or slow push — two-plus
+/// render-loop ticks of hold reads as at most the pre-fix skew prior to it.
+const METABALL_GATE_HOLD: std::time::Duration = std::time::Duration::from_millis(40);
+
+/// Grows an element rect into a metaball surface's canvas.
+///
+/// The grown rect is snapped onto the window's integer pixel grid — the
+/// exact truncation [`SurfaceAnchor::Rect`] applies when the host places
+/// the surface (`as i32` per component, geometry.rs). The field's ball
+/// coordinates are derived from this canvas, so the snap must match the
+/// placement exactly: a canvas the field assumes at x.6 but that renders
+/// at x.0 shifts this surface's whole silhouette by up to a pixel against
+/// its neighbors' — the merged blob's halves then disagree about where the
+/// territory bisector falls, opening a 1px hollow seam between two merging
+/// metaballs (or a double-composited dark seam, on the other side of the
+/// fraction). The truncation costs at most one pixel of the 48px slack.
+fn metaball_canvas(rect: [f32; 4], ball_radius: f32) -> [f32; 4] {
+    let slack = ball_radius + METABALL_CANVAS_SLACK_PX;
+    [
+        (rect[0] - slack).trunc(),
+        (rect[1] - slack).trunc(),
+        (rect[2] + 2.0 * slack).trunc(),
+        (rect[3] + 2.0 * slack).trunc(),
+    ]
+}
+
+/// Converts window-relative balls into canvas-relative ones (the surface
+/// spans exactly the canvas).
+fn metaball_balls_in_canvas(canvas: [f32; 4], balls: &[[f32; 4]]) -> Vec<[f32; 4]> {
+    balls
+        .iter()
+        .map(|ball| [ball[0] - canvas[0], ball[1] - canvas[1], ball[2], ball[3]])
+        .collect()
+}
+
+/// Whether every OTHER metaball surface of `host` already holds at least
+/// `generation`'s field — i.e. the push arriving now is the LAST one of its
+/// field change, the group is coherent, and the presents can fire together
+/// (one composition beat carries every half at the same field). A parked
+/// (paused) member is not required: it presents nothing until revived, and
+/// the revive path re-stamps its generation.
+fn metaball_group_coherent(
+    glasses: &HashMap<String, MenuGlass>,
+    updated: &str,
+    host: isize,
+    generation: u64,
+) -> bool {
+    glasses.values().all(|other| {
+        other.key == updated
+            || other.host != host
+            || other.metaball.is_none()
+            || other.metaball_generation >= generation
+            || other.surface.is_paused()
+    })
+}
+
+/// Releases the present-sync holds and force-presents every metaball
+/// surface of `host` holding at least `generation`'s field — called in the
+/// LAST member's push (the coherent preview matched), so the whole field
+/// group renders back to back on ONE composition beat: the shared blob
+/// composes whole, with no half at a younger field.
+fn release_and_present_metaball_group(
+    glasses: &mut HashMap<String, MenuGlass>,
+    overlay: HWND,
+    generation: u64,
+) {
+    let host = overlay.0 as isize;
+    for glass in glasses.values_mut() {
+        if glass.host == host
+            && glass.metaball.is_some()
+            && glass.metaball_generation >= generation
+        {
+            glass.surface.release_frame_gate();
+            let _ = glass.surface.present_now();
+        }
+    }
 }
 
 /// The shader's edge band and outline are proportional to the surface
@@ -195,6 +318,13 @@ pub struct MenuGlassManager {
     emitter: Mutex<Option<GroupEmitter>>,
     /// The live menu scale spring.
     spring: Arc<Mutex<MenuSpring>>,
+    /// The metaball field GENERATION AND CONTENT per host window: the
+    /// generation each metaball push joins (or advances), with a canonical
+    /// copy of the content it labels so sibling pushes of one field change
+    /// (identical field content, different own-first ball order) reuse the
+    /// same generation. The present-sync gate compares each surface's copy
+    /// generation against this (see [`MenuGlass::metaball_generation`]).
+    metaball_fields: Mutex<HashMap<isize, (u64, (Vec<[f32; 4]>, f32))>>,
 }
 
 unsafe impl Send for MenuGlassManager {}
@@ -204,6 +334,27 @@ impl Default for MenuGlassManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// One metaball element's push payload (see
+/// [`MenuGlassManager::position_menu_glass`]).
+///
+/// The `balls` field must carry the pushing element's OWN ball FIRST
+/// (index 0) — each metaball surface renders the shared field only where
+/// its own ball dominates, so every surface needs to know which ball is
+/// its own. The web side orders each surface's field copy that way.
+#[derive(Clone, Debug)]
+pub struct MetaballPush {
+    /// The element's own ball radius, physical pixels — the anchored
+    /// element itself may be a tiny dot far smaller than its blob.
+    pub ball_radius: f32,
+    /// The full shared field: every metaball element's ball, in
+    /// window-relative physical pixels (x, y, radius, weight). Every
+    /// metaball surface receives the WHOLE field, so metaball containers
+    /// merge with each other (and only with each other).
+    pub balls: Vec<[f64; 4]>,
+    /// The field's tension exponent (2 = the classic blend).
+    pub tension: f32,
 }
 
 impl MenuGlassManager {
@@ -218,6 +369,7 @@ impl MenuGlassManager {
             pending_group: Mutex::new(None),
             emitter: Mutex::new(None),
             spring: Arc::new(Mutex::new(MenuSpring::default())),
+            metaball_fields: Mutex::new(HashMap::new()),
         }
     }
 
@@ -237,6 +389,45 @@ impl MenuGlassManager {
 
     fn spring_anim_params(&self) -> (f64, f64, f64) {
         *self.spring_anim.lock().expect("spring anim lock poisoned")
+    }
+
+    /// Joins (or advances) the host's shared metaball field generation for
+    /// a push's field content. A push that re-states the generation's known
+    /// content reuses that generation — every metaball element pushes the
+    /// WHOLE shared field when any ball moves, so the sibling pushes of one
+    /// field change arrive with identical field content and MUST share one
+    /// generation for the present-sync gate to pair them (only a real
+    /// content change advances it). Stored canonically (balls sorted) since
+    /// each surface's copy carries its own ball first.
+    fn metaball_generation_for(
+        &self,
+        host: isize,
+        field: &MetaballFieldState,
+    ) -> u64 {
+        let mut canon = field.balls.clone();
+        // f32 has no Ord; compare element-wise with the IEEE total order so
+        // the canonical copy is a stable key (bit pattern, NaN included).
+        canon.sort_unstable_by(|a, b| {
+            for (left, right) in a.iter().zip(b.iter()) {
+                let ordering = left.total_cmp(right);
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        let canon_field = (canon, field.tension);
+        let mut fields = self
+            .metaball_fields
+            .lock()
+            .expect("metaball field generation lock poisoned");
+        let entry = fields.entry(host).or_insert((0, canon_field.clone()));
+        if entry.1 == canon_field {
+            return entry.0;
+        }
+        entry.0 += 1;
+        entry.1 = canon_field;
+        entry.0
     }
 
     /// Replaces the seed shader params; every surface created afterwards
@@ -284,11 +475,13 @@ impl MenuGlassManager {
     /// file is merged in first: another glass app may have restyled the
     /// shared material since our last apply, and a freshly spawned surface
     /// must never come up stale.
-    fn seed_params(&self, small: bool, height_px: f32, fade: bool) -> liquid_glass::GlassShaderParams {
-        let mut params = *self
-            .params
-            .lock()
-            .expect("params lock poisoned");
+    fn seed_params(
+        &self,
+        small: bool,
+        height_px: f32,
+        fade: bool,
+    ) -> liquid_glass::GlassShaderParams {
+        let mut params = *self.params.lock().expect("params lock poisoned");
         let material = liquid_glass::broker::read_material();
         material.apply_onto(&mut params, 1.0);
         params.glass_fade = if fade { 1.0 } else { 0.0 };
@@ -336,10 +529,13 @@ impl MenuGlassManager {
                         key: String::new(),
                         host: overlay.0 as isize,
                         rect: [0.0, 0.0, 1.0, 1.0],
+                        canvas: [0.0, 0.0, 1.0, 1.0],
                         radius: 20.0,
                         small: false,
                         fade: false,
                         local,
+                        metaball: None,
+                        metaball_generation: 0,
                     });
                 }
                 Err(error) => {
@@ -432,16 +628,18 @@ impl MenuGlassManager {
                 .lock()
                 .expect("pending group lock poisoned");
             match guard.as_ref() {
-                Some(group) => (group.keys.clone(), group.deadline, group.released, group.last_release),
+                Some(group) => (
+                    group.keys.clone(),
+                    group.deadline,
+                    group.released,
+                    group.last_release,
+                ),
                 None => return,
             }
         };
         let mut all_ready = true;
         {
-            let mut glasses = self
-                .glasses
-                .lock()
-                .expect("menu glasses lock poisoned");
+            let mut glasses = self.glasses.lock().expect("menu glasses lock poisoned");
             for key in &group_keys[released.min(group_keys.len())..] {
                 let presented = glasses
                     .get_mut(key)
@@ -467,10 +665,7 @@ impl MenuGlassManager {
             }
         }
         {
-            let mut glasses = self
-                .glasses
-                .lock()
-                .expect("menu glasses lock poisoned");
+            let mut glasses = self.glasses.lock().expect("menu glasses lock poisoned");
             if released < group_keys.len() {
                 let key = &group_keys[released];
                 released += 1;
@@ -483,8 +678,7 @@ impl MenuGlassManager {
                 // The web UI's content fade fires with the FIRST release so
                 // its eases ride the staggered reveals.
                 if released == 1 {
-                    if let Some(emit) =
-                        self.emitter.lock().expect("emitter lock poisoned").as_ref()
+                    if let Some(emit) = self.emitter.lock().expect("emitter lock poisoned").as_ref()
                     {
                         emit();
                     }
@@ -523,6 +717,13 @@ impl MenuGlassManager {
     /// an opacity fade. `spring` plays the scale-up bounce instead of the
     /// wobble reveal. `local` feeds the surface from its host window's own
     /// capture instead of the shared monitor capture (in-app glass).
+    ///
+    /// `metaball` turns the surface into a metaball container: its drawn
+    /// shape becomes the shared metaball field instead of the shape preset,
+    /// and the anchored canvas grows beyond the element rect so the blob
+    /// (and its merged necks) render around the — possibly tiny — element.
+    /// Every metaball element pushes the SAME full field, so their blobs
+    /// merge; a plain shape never merges with a field.
     #[allow(clippy::too_many_arguments)]
     pub fn position_menu_glass(
         &self,
@@ -535,7 +736,24 @@ impl MenuGlassManager {
         group: Option<&str>,
         spring: bool,
         local: bool,
+        metaball: Option<MetaballPush>,
     ) -> Result<(), String> {
+        let metaball = metaball.map(|push| MetaballFieldState {
+            ball_radius: push.ball_radius,
+            balls: push
+                .balls
+                .iter()
+                .map(|ball| {
+                    [
+                        ball[0] as f32,
+                        ball[1] as f32,
+                        ball[2] as f32,
+                        ball[3] as f32,
+                    ]
+                })
+                .collect(),
+            tension: push.tension,
+        });
         let reveal = if glass_fade {
             MENU_GLASS_FADE
         } else if instant || spring {
@@ -553,10 +771,35 @@ impl MenuGlassManager {
         } else {
             MENU_REVEAL
         };
-        let mut glasses = self
-            .glasses
-            .lock()
-            .expect("menu glasses lock poisoned");
+        // The metaball field's present-sync generation: advances only when
+        // the FIELD CONTENT changes — the sibling pushes of one field change
+        // re-state the same content and join the same generation (the gate
+        // below uses that to pair them). `None` for plain shapes.
+        let metaball_generation = metaball
+            .as_ref()
+            .map(|field| self.metaball_generation_for(overlay.0 as isize, field));
+        // The present-sync coherence preview: the push arriving now is the
+        // LAST one of its field change when every other metaball member of
+        // the host already holds the generation's field. Then (after the
+        // lock) the whole group releases + force-presents in this single op,
+        // and this push's own apply presents in step instead of gating —
+        // one composition beat carries every half at the same field. In any
+        // other push order the group stays incoherent: the just-updated
+        // surface holds its present through the compositor's gate, and the
+        // LAST member's op above presents everyone together.
+        let group_coherent = match (&metaball, metaball_generation) {
+            (Some(_), Some(generation)) => {
+                let glasses = self.glasses.lock().expect("menu glasses lock poisoned");
+                metaball_group_coherent(&glasses, key, overlay.0 as isize, generation)
+            }
+            _ => false,
+        };
+        let mut glasses = self.glasses.lock().expect("menu glasses lock poisoned");
+        if group_coherent {
+            if let Some(generation) = metaball_generation {
+                release_and_present_metaball_group(&mut glasses, overlay, generation);
+            }
+        }
         match rect {
             None => {
                 // Unused: collapse this menu's glass and park it for reuse.
@@ -586,44 +829,107 @@ impl MenuGlassManager {
                 return Ok(());
             }
             Some(rect) => {
-            // A surface switching feeds (global ↔ local) cannot be
-            // re-anchored into a different capture pipeline: park it and
-            // let the creation path below build the right kind.
-            if glasses
-                .get(key)
-                .is_some_and(|glass| glass.local != local)
-            {
-                if let Some(mut glass) = glasses.remove(key) {
-                    glass.surface.set_reveal(false, close_reveal);
-                    glass.surface.collapse_then_pause();
-                    let mut recycled = self
-                        .recycled
-                        .lock()
-                        .expect("recycled glasses lock poisoned");
-                    if recycled.len() < RECYCLE_POOL_MAX {
-                        recycled.push(glass);
+                // A surface switching feeds (global ↔ local) — or switching
+                // between a plain shape and a metaball field (a different
+                // canvas geometry and shape kind) — cannot be re-anchored into
+                // the other kind: park it and let the creation path below
+                // build the right one.
+                if glasses.get(key).is_some_and(|glass| {
+                    glass.local != local || glass.metaball.is_some() != metaball.is_some()
+                }) {
+                    if let Some(mut glass) = glasses.remove(key) {
+                        glass.surface.set_reveal(false, close_reveal);
+                        glass.surface.collapse_then_pause();
+                        let mut recycled = self
+                            .recycled
+                            .lock()
+                            .expect("recycled glasses lock poisoned");
+                        if recycled.len() < RECYCLE_POOL_MAX {
+                            recycled.push(glass);
+                        }
                     }
                 }
-            }
-            if let Some(glass) = glasses.get_mut(key) {
+                if let Some(glass) = glasses.get_mut(key) {
+                    // Metaball surfaces anchor a canvas grown beyond the
+                    // element (the blob renders around the tiny element);
+                    // plain surfaces anchor the element rect itself.
+                    let surface_rect = metaball
+                        .as_ref()
+                        .map_or(rect, |metaball| metaball_canvas(rect, metaball.ball_radius));
                     let moved = !glass
-                        .rect
+                        .canvas
                         .iter()
-                        .zip(rect.iter())
+                        .zip(surface_rect.iter())
                         .all(|(a, b)| (a - b).abs() < 2.0);
                     if moved {
-                        glass.surface.set_anchor(SurfaceAnchor::Rect {
-                            offset_x: rect[0],
-                            offset_y: rect[1],
-                            width: rect[2],
-                            height: rect[3],
+                        // KEEP the surface's z slot: this re-anchor happens
+                        // per frame while a metaball is dragged, and the
+                        // full re-pin would insert the surface at the
+                        // bottom of the host's surface stack — burying the
+                        // dragged blob beneath the host's other glass
+                        // mid-drag. Z repair belongs to `sync_bounds`
+                        // (host events), which re-pins in a deliberate
+                        // order.
+                        glass.surface.set_anchor_keep_z(SurfaceAnchor::Rect {
+                            offset_x: surface_rect[0],
+                            offset_y: surface_rect[1],
+                            width: surface_rect[2],
+                            height: surface_rect[3],
                         })?;
                         glass.rect = rect;
+                        glass.canvas = surface_rect;
                         // The SDF's corner radius is normalized to the
                         // surface height, which may have changed with the
                         // new rect; re-apply it.
                         glass.surface.set_corner_radius(glass.radius)?;
                         Self::update_hit_rect(overlay, &self.hit_rects, key, &rect);
+                    }
+                    // The metaball field rides on top as pure constant-buffer
+                    // updates — dragged balls re-target at the render loop's
+                    // rate with no window operations at all. `balls[0]` is
+                    // this element's own ball (the web orders each push that
+                    // way), so the territory clip splits the merged blob
+                    // between the sharing surfaces instead of rendering it
+                    // on every one of them.
+                    if glass.metaball != metaball {
+                        if let (Some(metaball), Some(generation)) = (&metaball, metaball_generation)
+                        {
+                            // The field MUST be converted against the canvas the
+                            // surface window is actually placed at — `glass.canvas`
+                            // — never the freshly computed `surface_rect`: when the
+                            // `moved` tolerance above suppressed the re-anchor (the
+                            // snapped canvas can flip by 1px while the element
+                            // merely drifts sub-pixel), the window still sits on
+                            // the OLD canvas. Converting against the new one then
+                            // shifts this surface's whole silhouette by the
+                            // suppressed delta against its neighbors' — their
+                            // territory bisectors disagree and the thin merged
+                            // neck opens a 1px hollow seam. (When `moved` was
+                            // true, `glass.canvas` was just set to the new rect,
+                            // so this matches either way.)
+                            glass.surface.set_metaballs_field_px(
+                                &metaball_balls_in_canvas(glass.canvas, &metaball.balls),
+                                metaball.tension,
+                                Some(0),
+                            )?;
+                            glass.metaball_generation = generation;
+                            // Present-sync: this window move + field must land on
+                            // ONE composition beat (a throttled loop tick 1-2
+                            // beats later would compose the moved window with the
+                            // OLD blob, stretching the neck with drag speed). A
+                            // coherent group needs the LAST member's push — its
+                            // coherence op already force-presented everyone — so
+                            // only the LAST member presents here, and only while
+                            // no hold is outstanding.
+                            if group_coherent {
+                                let _ = glass.surface.present_now();
+                            } else {
+                                glass
+                                    .surface
+                                    .gate_frame(std::time::Instant::now() + METABALL_GATE_HOLD);
+                            }
+                        }
+                        glass.metaball = metaball;
                     }
                     // Radius changes reconfigure the existing GPU surface in
                     // place; tearing down and rebuilding the surface (with a
@@ -665,9 +971,14 @@ impl MenuGlassManager {
                         .lock()
                         .expect("recycled glasses lock poisoned");
                     let overlay_host = overlay.0 as isize;
-                    let match_index = recycled
-                        .iter()
-                        .rposition(|pooled| pooled.local == local && pooled.host == overlay_host);
+                    let surface_rect = metaball
+                        .as_ref()
+                        .map_or(rect, |metaball| metaball_canvas(rect, metaball.ball_radius));
+                    let match_index = recycled.iter().rposition(|pooled| {
+                        pooled.local == local
+                            && pooled.host == overlay_host
+                            && pooled.metaball.is_some() == metaball.is_some()
+                    });
                     let pooled = match_index.map(|index| recycled.remove(index));
                     drop(recycled);
                     match pooled {
@@ -675,10 +986,10 @@ impl MenuGlassManager {
                             recycled
                                 .surface
                                 .set_anchor(SurfaceAnchor::Rect {
-                                    offset_x: rect[0],
-                                    offset_y: rect[1],
-                                    width: rect[2],
-                                    height: rect[3],
+                                    offset_x: surface_rect[0],
+                                    offset_y: surface_rect[1],
+                                    width: surface_rect[2],
+                                    height: surface_rect[3],
                                 })
                                 .map_err(|error| {
                                     eprintln!("glass-ui menu glass re-anchor failed: {error}");
@@ -693,10 +1004,10 @@ impl MenuGlassManager {
                             let config = Self::menu_config(
                                 radius,
                                 SurfaceAnchor::Rect {
-                                    offset_x: rect[0],
-                                    offset_y: rect[1],
-                                    width: rect[2],
-                                    height: rect[3],
+                                    offset_x: surface_rect[0],
+                                    offset_y: surface_rect[1],
+                                    width: surface_rect[2],
+                                    height: surface_rect[3],
                                 },
                                 local,
                             );
@@ -708,6 +1019,23 @@ impl MenuGlassManager {
                                     return Err(error);
                                 }
                             };
+                            // A metaball surface's field must be on before
+                            // the reveal so the first visible frame already
+                            // shows the blob (not a stale preset shape).
+                            if let Some(metaball) = &metaball {
+                                surface.set_metaballs_field_px(
+                                    &metaball_balls_in_canvas(surface_rect, &metaball.balls),
+                                    metaball.tension,
+                                    Some(0),
+                                )?;
+                                if !group_coherent {
+                                    surface.gate_frame(
+                                        std::time::Instant::now() + METABALL_GATE_HOLD,
+                                    );
+                                } else {
+                                    let _ = surface.present_now();
+                                }
+                            }
                             let small = group.is_some();
                             // Seed the fresh surface with the saved glass
                             // settings (plus this surface's fade style) BEFORE
@@ -734,10 +1062,13 @@ impl MenuGlassManager {
                                 key: key.to_owned(),
                                 host: overlay.0 as isize,
                                 rect,
+                                canvas: surface_rect,
                                 radius,
                                 small,
                                 fade: glass_fade,
                                 local,
+                                metaball: metaball.clone(),
+                                metaball_generation: metaball_generation.unwrap_or(0),
                             }
                         }
                     }
@@ -769,7 +1100,41 @@ impl MenuGlassManager {
                 } else {
                     glass.surface.set_reveal(true, reveal);
                 }
+                // Apply (or refresh) the metaball field against THIS canvas:
+                // a pooled surface carries a stale canvas origin, and even a
+                // fresh one records its state here for the dedup below.
+                let surface_rect = metaball
+                    .as_ref()
+                    .map_or(rect, |metaball| metaball_canvas(rect, metaball.ball_radius));
+                if let Some(metaball) = &metaball {
+                    if glass.metaball.as_ref() != Some(metaball) || glass.canvas != surface_rect {
+                        glass.surface.set_metaballs_field_px(
+                            &metaball_balls_in_canvas(surface_rect, &metaball.balls),
+                            metaball.tension,
+                            Some(0),
+                        )?;
+                    }
+                }
+                // The pooled/fresh surface's field generation marker: even a
+                // content-hit recycles into the current generation (its copy
+                // is the pushed field group's state either way).
+                glass.metaball_generation = metaball_generation.unwrap_or(0);
+                if let Some(metaball) = &metaball {
+                    if glass.metaball.as_ref() != Some(metaball) || glass.canvas != surface_rect {
+                        if !group_coherent {
+                            glass
+                                .surface
+                                .gate_frame(std::time::Instant::now() + METABALL_GATE_HOLD);
+                        } else {
+                            let _ = glass.surface.present_now();
+                        }
+                        glass.metaball = Some(metaball.clone());
+                    }
+                } else {
+                    glass.metaball = None;
+                }
                 glass.rect = rect;
+                glass.canvas = surface_rect;
                 glass.radius = radius;
                 glass.key = key.to_owned();
                 glass.host = overlay.0 as isize;
@@ -1003,10 +1368,7 @@ impl MenuGlassManager {
     /// 1 Hz despawn/respawn war.
     pub fn sync_glasses(&self, keys: &[String], host: isize) {
         let stale: Vec<String> = {
-            let glasses = self
-                .glasses
-                .lock()
-                .expect("menu glasses lock poisoned");
+            let glasses = self.glasses.lock().expect("menu glasses lock poisoned");
             glasses
                 .iter()
                 .filter(|(_, glass)| glass.host == host && !keys.contains(&glass.key.clone()))
@@ -1019,10 +1381,7 @@ impl MenuGlassManager {
         for key in stale {
             // The close path: collapse to the end, then park for reuse.
             let closed = {
-                let mut glasses = self
-                    .glasses
-                    .lock()
-                    .expect("menu glasses lock poisoned");
+                let mut glasses = self.glasses.lock().expect("menu glasses lock poisoned");
                 glasses.remove(&key)
             };
             if let Some(mut glass) = closed {
@@ -1084,9 +1443,21 @@ impl MenuGlassManager {
 
     /// Re-syncs every menu surface's bounds after the overlay moved or
     /// resized.
+    ///
+    /// The re-pin order is deliberate: each re-pin inserts the surface
+    /// directly above its host, pushing earlier ones higher — so METABALL
+    /// surfaces are re-pinned FIRST and end up ABOVE the plain containers.
+    /// Without the partition the map's iteration order decided who floated,
+    /// and a plain panel's glass could bury a metaball blob (the blobs are
+    /// playful floating elements; they read on top or not at all).
     pub fn sync_bounds(&self, overlay: HWND) {
         if let Ok(mut glasses) = self.glasses.lock() {
-            for glass in glasses.values_mut() {
+            let mut ordered: Vec<&mut MenuGlass> = glasses.values_mut().collect();
+            ordered.sort_by_key(|glass| match glass.metaball {
+                Some(_) => 0,
+                None => 1,
+            });
+            for glass in ordered {
                 let _ = glass.surface.sync_bounds(overlay.0 as isize);
             }
         }
@@ -1115,5 +1486,48 @@ impl MenuGlassManager {
             .lock()
             .expect("ui hit rects lock poisoned")
             .clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::metaball_canvas;
+
+    /// The canvas feeds both the surface's anchor rect and the metaball
+    /// field's coordinate origin, so every component must survive the
+    /// host's integer truncation (`as i32` in anchor_rect) unchanged —
+    /// otherwise the rendered silhouette shifts up to a pixel against the
+    /// field the shader evaluates, and neighboring metaball surfaces'
+    /// territory bisectors disagree (the 1px hollow merge seam).
+    #[test]
+    fn metaball_canvas_snaps_to_the_host_pixel_grid() {
+        // Fractional element rects are the norm: CSS layout subpixels and
+        // fractional DPI scales both land here.
+        for rect in [
+            [10.4, 20.6, 30.2, 40.8],
+            [0.25, 0.75, 100.5, 60.25],
+            [-3.5, 7.2, 88.9, 12.4],
+        ] {
+            for ball_radius in [0.0f32, 64.0, 121.5] {
+                let canvas = metaball_canvas(rect, ball_radius);
+                assert!(
+                    canvas.iter().all(|value| value.fract() == 0.0),
+                    "canvas {canvas:?} is not on the integer pixel grid"
+                );
+                // The truncation the host applies must be a no-op.
+                let truncated: [f32; 4] = canvas
+                    .iter()
+                    .map(|value| *value as i32 as f32)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap();
+                assert_eq!(truncated, canvas, "host truncation would move the canvas");
+            }
+        }
+        // The snap must not shrink the canvas meaningfully: the grown rect
+        // still covers the ball plus the merge slack.
+        let canvas = metaball_canvas([100.9, 100.1, 16.4, 16.6], 64.0);
+        assert!((canvas[2] - (16.4 + 2.0 * (64.0 + 48.0))).abs() < 2.0);
+        assert!((canvas[3] - (16.6 + 2.0 * (64.0 + 48.0))).abs() < 2.0);
     }
 }

@@ -24,10 +24,10 @@ pub mod manager;
 #[cfg(feature = "tauri")]
 pub mod commands;
 
-pub use manager::{
-    small_surface_params, spring_constants, spring_step, MenuGlassManager,
-};
 pub use liquid_glass::RevealAnimation;
+pub use manager::{
+    small_surface_params, spring_constants, spring_step, MenuGlassManager, MetaballPush,
+};
 
 /// The default menu reveal: a liquid bubble from the bottom center
 /// (menus anchored to a bar or trigger at the bottom of the overlay grow

@@ -3,12 +3,46 @@ import type { CSSProperties, ReactNode } from "react";
 import {
   positionMenuGlass,
   syncMenuGlasses,
+  type MetaballField,
 } from "./bridge";
 import { onDomMutations } from "./domWatch";
 
 const DEFAULT_RADIUS_PX = 20;
 const TRACK_INTERVAL_MS = 120;
 const SWEEP_INTERVAL_MS = 1000;
+
+/* ---- The shared metaball field ----
+ * Every metaball-flagged surface registers a live getter for its own ball
+ * (its element's center + the configured radius). Each metaball surface
+ * pushes the WHOLE field to its own native surface, so metaball containers
+ * merge with each other — and only with each other; plain shapes never
+ * join the field. `metaballVersion` bumps whenever any ball may have
+ * moved, so the other metaball surfaces re-push their (now stale) field
+ * copy; each surface dedups its pushes against the version it last sent. */
+interface MetaballBall {
+  x: number;
+  y: number;
+  r: number;
+  w: number;
+}
+
+const metaballBalls = new Map<string, () => MetaballBall | null>();
+const metaballListeners = new Set<() => void>();
+let metaballVersion = 0;
+
+/**
+ * Re-pushes every metaball surface's shared field. Call after moving a
+ * metaball element outside the surfaces' own tracking (e.g. from a drag
+ * handler that positions the element directly): the native field is a
+ * constant-buffer update per surface, so blobs track the pointer at frame
+ * rate with no window resizes.
+ */
+export function notifyMetaballs(): void {
+  metaballVersion += 1;
+  for (const listener of [...metaballListeners]) {
+    listener();
+  }
+}
 
 /**
  * The registry of menu-glass keys the webview currently tracks, driving the
@@ -82,6 +116,7 @@ function pushRect(
   glassFade?: boolean,
   spring?: boolean,
   local?: boolean,
+  metaball?: MetaballField,
 ): void {
   const rect = node.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
@@ -99,6 +134,7 @@ function pushRect(
     glassFade,
     spring,
     local,
+    metaball,
   );
 }
 
@@ -200,6 +236,9 @@ export function LiquidGlassSurface({
   instant,
   group,
   backdrop,
+  metaball = false,
+  metaballRadiusPx,
+  metaballTension = 2,
   children,
 }: {
   className?: string;
@@ -212,6 +251,21 @@ export function LiquidGlassSurface({
   group?: string;
   /** Which feed paints the backdrop (see [`GlassBackdrop`]). */
   backdrop?: GlassBackdrop;
+  /** Renders this surface as a METABALL container: the drawn shape becomes
+   *  the shared metaball field (a liquid blob of radius `metaballRadiusPx`
+   *  centered on this element) instead of the shape preset. Metaball
+   *  containers merge with each other — and only with each other — as
+   *  their elements approach; plain shapes never join the field. The
+   *  anchored element may be far smaller than its blob (a tiny draggable
+   *  dot): the native canvas grows around it so the blob and its merged
+   *  necks render in full. */
+  metaball?: boolean;
+  /** This element's ball radius in CSS pixels. Defaults to half the
+   *  element's smaller dimension (the element circumscribed). */
+  metaballRadiusPx?: number;
+  /** The field's tension exponent (2 = the classic metaball blend; higher
+   *  values merge tighter and rounder, lower ones stretch long necks). */
+  metaballTension?: number;
   children?: ReactNode;
 }) {
   const surfaceId = useId();
@@ -240,13 +294,22 @@ export function LiquidGlassSurface({
     registerGlassKey(surfaceId);
     const selector = `[data-liquid-glass-surface="${surfaceId}"]`;
     let node: HTMLElement | null = null;
+    // Metaball push bookkeeping: the ball identity of the last push (own
+    // movement bumps the shared field version) and the version last sent
+    // to the native side (skips redundant field pushes).
+    let pendingPush = 0;
+    let lastBallKey = "";
+    let lastPushedVersion = -1;
     const pushNode = () => {
       node ??= document.querySelector<HTMLElement>(selector);
-      if (node) {
-        const rect = node.getBoundingClientRect();
-        if (rect.width < 1 || rect.height < 1) {
-          return;
-        }
+      if (!node) {
+        return;
+      }
+      const rect = node.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) {
+        return;
+      }
+      if (!metaball) {
         pushRect(
           node,
           radiusPx,
@@ -257,8 +320,100 @@ export function LiquidGlassSurface({
           undefined,
           local,
         );
+        return;
+      }
+      // Metaball path: the shared field rides on every push. The element's
+      // own movement bumps the shared version, so sibling metaball
+      // surfaces refresh their (now stale) field copies; each surface
+      // dedups against the version it last sent.
+      const ballRadius = metaballRadiusPx ?? Math.min(rect.width, rect.height) / 2;
+      const ballKey = [
+        rect.left.toFixed(1),
+        rect.top.toFixed(1),
+        rect.width.toFixed(1),
+        rect.height.toFixed(1),
+        ballRadius.toFixed(1),
+      ].join(",");
+      const ownBallMoved = ballKey !== lastBallKey;
+      if (ownBallMoved) {
+        lastBallKey = ballKey;
+        metaballVersion += 1;
+      }
+      if (metaballVersion === lastPushedVersion) {
+        return;
+      }
+      lastPushedVersion = metaballVersion;
+      const scale = window.devicePixelRatio || 1;
+      // Each metaball surface's field copy carries ITS OWN ball FIRST
+      // (index 0) — the native territory clip renders the merged blob only
+      // where the own ball dominates, so the sharing surfaces tile it
+      // exactly instead of double-compositing their canvases' overlap.
+      const balls: Array<[number, number, number, number]> = [];
+      const ownBall = metaballBalls.get(surfaceId)?.() ?? null;
+      if (ownBall) {
+        balls.push([ownBall.x * scale, ownBall.y * scale, ownBall.r * scale, ownBall.w]);
+      }
+      for (const [key, getBall] of metaballBalls) {
+        if (key === surfaceId) {
+          continue;
+        }
+        const ball = getBall();
+        if (ball) {
+          balls.push([ball.x * scale, ball.y * scale, ball.r * scale, ball.w]);
+        }
+      }
+      pushRect(
+        node,
+        radiusPx,
+        surfaceId,
+        pushesInstant(resolved),
+        group,
+        isGlassFade(resolved),
+        undefined,
+        local,
+        { radius: ballRadius, balls, tension: metaballTension },
+      );
+      // This surface's own ball moved: the siblings' field copies are
+      // stale NOW, not at their next tracking tick — schedule their
+      // pushes too (each coalesces and version-dedups its own).
+      if (ownBallMoved) {
+        for (const listener of [...metaballListeners]) {
+          if (listener !== schedulePush) {
+            listener();
+          }
+        }
       }
     };
+    // The shared-field notify path: coalesced to one push per frame (a
+    // dragged element bumps the version every pointer move).
+    const schedulePush = () => {
+      if (pendingPush) {
+        return;
+      }
+      pendingPush = requestAnimationFrame(() => {
+        pendingPush = 0;
+        pushNode();
+      });
+    };
+    if (metaball) {
+      metaballBalls.set(surfaceId, () => {
+        const current = node ?? document.querySelector<HTMLElement>(selector);
+        if (!current) {
+          return null;
+        }
+        const rect = current.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) {
+          return null;
+        }
+        return {
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          r: metaballRadiusPx ?? Math.min(rect.width, rect.height) / 2,
+          w: 1,
+        };
+      });
+      metaballListeners.add(schedulePush);
+    }
     // The wrapper can move before the first push (popup positioning, fonts,
     // reflows); wait two frames so the glass only follows the settled rect.
     const pushSettled = () => {
@@ -271,11 +426,20 @@ export function LiquidGlassSurface({
       window.clearTimeout(attach);
       observer.disconnect();
       window.clearInterval(timer);
+      if (pendingPush) {
+        cancelAnimationFrame(pendingPush);
+      }
+      if (metaball) {
+        metaballBalls.delete(surfaceId);
+        metaballListeners.delete(schedulePush);
+        // The field shrank: siblings must re-push without this ball.
+        metaballVersion += 1;
+      }
       unregisterGlassKey(surfaceId);
       // Unused: delete this menu's own glass instance.
       void positionMenuGlass(surfaceId, null);
     };
-  }, [surfaceId, radiusPx, resolved, group, local]);
+  }, [surfaceId, radiusPx, resolved, group, local, metaball, metaballRadiusPx, metaballTension]);
 
   return (
     <div

@@ -13,7 +13,7 @@
  *      sync_menu_glasses, prewarm_menu_glass, set_ui_hit_rects, log_message.
  *   3. Ship a glass-broker.exe beside the app executable.
  */
-export { LiquidGlassSurface, useLiquidGlassSurface } from "./LiquidGlassSurface";
+export { LiquidGlassSurface, useLiquidGlassSurface, notifyMetaballs } from "./LiquidGlassSurface";
 export type { GlassTransition, GlassBackdrop } from "./LiquidGlassSurface";
 export { LiquidDropdown } from "./LiquidDropdown";
 export type { LiquidDropdownItem } from "./LiquidDropdown";
