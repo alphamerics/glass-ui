@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use liquid_glass::{
-    translate_compositor, translate_surface_window, GlassConfig, GlassSurface, SharedCompositor,
-    SurfaceAnchor,
+    translate_compositor, translate_surface_window, GlassConfig, GlassShape, GlassSurface,
+    SharedCompositor, SurfaceAnchor,
 };
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
@@ -51,6 +51,11 @@ struct MenuGlass {
     /// host app's own content. Recycled surfaces only ever re-enter menus
     /// of their own kind — and their own host window.
     local: bool,
+    /// The surface's own shape preset (the web UI's `shape` prop):
+    /// `None` is the default rounded rect, `Some(Superellipse)` draws the
+    /// squircle. Applied onto the surface when it changes (recycled
+    /// surfaces carry their previous life's value for the dedup).
+    shape: Option<GlassShape>,
     /// Metaball state: when set, the surface draws a metaball field instead
     /// of its shape preset. The field is SHARED between every metaball
     /// element of the window (the web UI pushes the full ball set with each
@@ -67,6 +72,11 @@ struct MenuGlass {
     /// (a loop tick between two sibling pushes would otherwise present one
     /// new half against an old one, opening a mid-frame gap in the neck).
     metaball_generation: u64,
+    /// The transform target last applied through the animate API (the
+    /// engine-units conversion of the key's held spec), for dedup: a
+    /// re-stated identical target must not restart a running tween (CSS
+    /// transition semantics — no value change, no restart).
+    animated_transform: Option<[f32; 4]>,
 }
 
 /// One metaball surface's field state, deduplicated against incoming pushes.
@@ -76,17 +86,18 @@ struct MetaballFieldState {
     /// be a tiny anchor dot far smaller than its blob.
     ball_radius: f32,
     /// The full shared field: every metaball element's ball, in
-    /// window-relative physical pixels (x, y, radius, weight).
-    balls: Vec<[f32; 4]>,
+    /// window-relative physical pixels (x, y, extentX, extentY, weight,
+    /// exponent). Exponent 2 with equal extents is the plain circle.
+    balls: Vec<[f32; 6]>,
     /// The field's tension exponent (2 = the classic blend).
     tension: f32,
 }
 
 /// How far a metaball surface's canvas extends beyond its anchored element:
-/// the ball's own radius (the blob must render around the tiny element that
-/// anchors it) plus slack for the merged neck reaching toward neighbor
-/// balls. Neighbor canvases overlap across this slack, so together they
-/// cover the whole merged silhouette.
+/// the ball silhouette's own reach (the blob must render around the tiny
+/// element that anchors it) plus slack for the merged neck reaching toward
+/// neighbor balls. Neighbor canvases overlap across this slack, so together
+/// they cover the whole merged silhouette.
 const METABALL_CANVAS_SLACK_PX: f32 = 48.0;
 
 /// How long the present-sync gate holds a just-updated metaball surface
@@ -97,6 +108,29 @@ const METABALL_CANVAS_SLACK_PX: f32 = 48.0;
 /// pump; the deadline is the safety net for a lost or slow push — two-plus
 /// render-loop ticks of hold reads as at most the pre-fix skew prior to it.
 const METABALL_GATE_HOLD: std::time::Duration = std::time::Duration::from_millis(40);
+
+/// How far a ball's silhouette reaches from its center: the plain circle's
+/// radius, or a shaped ball's superellipse corner distance (the
+/// conservative bounding-disc radius of its silhouette).
+fn metaball_ball_reach(ball: [f32; 6]) -> f32 {
+    let circle = ball[5] == 2.0 && ball[2] == ball[3];
+    if circle {
+        ball[2]
+    } else {
+        (ball[2] * ball[2] + ball[3] * ball[3]).sqrt()
+    }
+}
+
+/// The canvas slack for a field state: the OWN ball's silhouette reach
+/// (its field copy carries its own ball first) — a circle ball keeps the
+/// classic exact radius, a shaped one the corner distance.
+fn metaball_reach(field: &MetaballFieldState) -> f32 {
+    field
+        .balls
+        .first()
+        .map(|ball| metaball_ball_reach(*ball))
+        .unwrap_or(field.ball_radius)
+}
 
 /// Grows an element rect into a metaball surface's canvas.
 ///
@@ -110,8 +144,8 @@ const METABALL_GATE_HOLD: std::time::Duration = std::time::Duration::from_millis
 /// territory bisector falls, opening a 1px hollow seam between two merging
 /// metaballs (or a double-composited dark seam, on the other side of the
 /// fraction). The truncation costs at most one pixel of the 48px slack.
-fn metaball_canvas(rect: [f32; 4], ball_radius: f32) -> [f32; 4] {
-    let slack = ball_radius + METABALL_CANVAS_SLACK_PX;
+fn metaball_canvas(rect: [f32; 4], reach: f32) -> [f32; 4] {
+    let slack = reach + METABALL_CANVAS_SLACK_PX;
     [
         (rect[0] - slack).trunc(),
         (rect[1] - slack).trunc(),
@@ -121,11 +155,21 @@ fn metaball_canvas(rect: [f32; 4], ball_radius: f32) -> [f32; 4] {
 }
 
 /// Converts window-relative balls into canvas-relative ones (the surface
-/// spans exactly the canvas).
-fn metaball_balls_in_canvas(canvas: [f32; 4], balls: &[[f32; 4]]) -> Vec<[f32; 4]> {
+/// spans exactly the canvas). Position and extents translate; weight and
+/// exponent ride along.
+fn metaball_balls_in_canvas(canvas: [f32; 4], balls: &[[f32; 6]]) -> Vec<[f32; 6]> {
     balls
         .iter()
-        .map(|ball| [ball[0] - canvas[0], ball[1] - canvas[1], ball[2], ball[3]])
+        .map(|ball| {
+            [
+                ball[0] - canvas[0],
+                ball[1] - canvas[1],
+                ball[2],
+                ball[3],
+                ball[4],
+                ball[5],
+            ]
+        })
         .collect()
 }
 
@@ -324,7 +368,13 @@ pub struct MenuGlassManager {
     /// (identical field content, different own-first ball order) reuse the
     /// same generation. The present-sync gate compares each surface's copy
     /// generation against this (see [`MenuGlass::metaball_generation`]).
-    metaball_fields: Mutex<HashMap<isize, (u64, (Vec<[f32; 4]>, f32))>>,
+    metaball_fields: Mutex<HashMap<isize, (u64, (Vec<[f32; 6]>, f32))>>,
+    /// The transform spec held per menu key (the `animate_menu_glass`
+    /// API's storage): the key's CURRENT transform target, so a surface
+    /// freshly created or recycled for the key snaps to it — the transform
+    /// is a property of the menu, not of one surface life. Removed when
+    /// the menu closes.
+    transforms: Mutex<HashMap<String, GlassTransformAnimation>>,
 }
 
 unsafe impl Send for MenuGlassManager {}
@@ -349,12 +399,84 @@ pub struct MetaballPush {
     /// element itself may be a tiny dot far smaller than its blob.
     pub ball_radius: f32,
     /// The full shared field: every metaball element's ball, in
-    /// window-relative physical pixels (x, y, radius, weight). Every
-    /// metaball surface receives the WHOLE field, so metaball containers
-    /// merge with each other (and only with each other).
-    pub balls: Vec<[f64; 4]>,
+    /// window-relative physical pixels (x, y, extentX, extentY, weight,
+    /// exponent). Exponent 2 with equal extents is the plain circle; any
+    /// other exponent or unequal extents shapes the ball's silhouette.
+    /// Every metaball surface receives the WHOLE field, so metaball
+    /// containers merge with each other (and only with each other).
+    pub balls: Vec<[f64; 6]>,
     /// The field's tension exponent (2 = the classic blend).
     pub tension: f32,
+}
+
+/// A CSS-style animated transform for a menu glass's drawn shape, expressed
+/// the way a web author writes it: a scale factor and a translate in
+/// PHYSICAL pixels (both center-anchored, like CSS's default
+/// `transform-origin: center`), animated over `duration_ms` after
+/// `delay_ms` through a cubic-bezier curve (`easing` = the `[x1, y1, x2,
+/// y2]` control points — the CSS timing function). The glass transitions
+/// from wherever it visually is into the target (CSS transition
+/// semantics), and the target persists until changed or the menu closes.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GlassTransformAnimation {
+    /// The animation's duration in milliseconds (default 240).
+    pub duration_ms: f64,
+    /// The animation's start delay in milliseconds (default 0).
+    pub delay_ms: f64,
+    /// The cubic-bezier control points `[x1, y1, x2, y2]` (default
+    /// `[0.25, 0.1, 0.25, 1]` — CSS `ease`). x coordinates are clamped to
+    /// [0, 1] (CSS's validation); y may overshoot for back-out curves.
+    pub easing: [f64; 4],
+    /// The scale factors `(x, y)` (default 1 = unscaled).
+    pub scale: [f64; 2],
+    /// The translation in physical pixels `(x, y)`, center-anchored
+    /// (default none).
+    pub translate: [f64; 2],
+}
+
+impl Default for GlassTransformAnimation {
+    fn default() -> Self {
+        Self {
+            duration_ms: 240.0,
+            delay_ms: 0.0,
+            easing: [0.25, 0.1, 0.25, 1.0],
+            scale: [1.0, 1.0],
+            translate: [0.0, 0.0],
+        }
+    }
+}
+
+/// Converts a [`GlassTransformAnimation`] into the engine's shape
+/// transform for a surface whose shape region spans `canvas` (x, y, w, h,
+/// physical pixels; the identity region the menu surfaces use).
+///
+/// The engine's transform is `(scale_x, scale_y, offset_x, offset_y)` in
+/// shape-region units anchored to the shape's BOTTOM-CENTER, while the CSS
+/// model scales and translates around the element's CENTER. With the
+/// shader mapping `s' = (s - offset - anchor) / scale + anchor` (anchor =
+/// `(0, 0.5)`, s in units of the canvas height), the center-anchored
+/// equivalent is:
+///
+/// - `offset_x = dx / h`
+/// - `offset_y = dy / h - 0.5 + 0.5 * scale_y`
+///
+/// (the `±0.5` terms re-anchor the scale from bottom-center to center; the
+/// offset is applied unscaled by the shader, so the translate lands
+/// exactly regardless of the scale).
+fn css_transform_to_engine(
+    canvas: [f32; 4],
+    scale: [f64; 2],
+    translate: [f64; 2],
+) -> [f32; 4] {
+    let height = canvas[3].max(1.0);
+    let scale_x = scale[0] as f32;
+    // CSS scale(0) would collapse the shape onto its anchor; the shader's
+    // own `max(…, 1e-4)` guard matches.
+    let scale_y = (scale[1] as f32).max(1e-4);
+    let offset_x = (translate[0] as f32) / height;
+    let offset_y = (translate[1] as f32) / height - 0.5 + 0.5 * scale_y;
+    [scale_x, scale_y, offset_x, offset_y]
 }
 
 impl MenuGlassManager {
@@ -370,6 +492,7 @@ impl MenuGlassManager {
             emitter: Mutex::new(None),
             spring: Arc::new(Mutex::new(MenuSpring::default())),
             metaball_fields: Mutex::new(HashMap::new()),
+            transforms: Mutex::new(HashMap::new()),
         }
     }
 
@@ -534,8 +657,10 @@ impl MenuGlassManager {
                         small: false,
                         fade: false,
                         local,
+                        shape: None,
                         metaball: None,
                         metaball_generation: 0,
+                        animated_transform: None,
                     });
                 }
                 Err(error) => {
@@ -724,6 +849,10 @@ impl MenuGlassManager {
     /// (and its merged necks) render around the — possibly tiny — element.
     /// Every metaball element pushes the SAME full field, so their blobs
     /// merge; a plain shape never merges with a field.
+    ///
+    /// `shape` selects the surface's own preset beyond the rounded rect:
+    /// `Some(GlassShape::Superellipse)` draws the squircle (its exponent
+    /// carries over as the metaball ball's shape when merging).
     #[allow(clippy::too_many_arguments)]
     pub fn position_menu_glass(
         &self,
@@ -736,6 +865,7 @@ impl MenuGlassManager {
         group: Option<&str>,
         spring: bool,
         local: bool,
+        shape: Option<GlassShape>,
         metaball: Option<MetaballPush>,
     ) -> Result<(), String> {
         let metaball = metaball.map(|push| MetaballFieldState {
@@ -749,6 +879,8 @@ impl MenuGlassManager {
                         ball[1] as f32,
                         ball[2] as f32,
                         ball[3] as f32,
+                        ball[4] as f32,
+                        ball[5] as f32,
                     ]
                 })
                 .collect(),
@@ -821,6 +953,12 @@ impl MenuGlassManager {
                     .lock()
                     .expect("menu hit rects lock poisoned")
                     .remove(key);
+                // The menu is gone: its held transform spec goes with it
+                // (a re-open starts fresh; the web UI re-sends its props).
+                self.transforms
+                    .lock()
+                    .expect("transforms lock poisoned")
+                    .remove(key);
                 // Always drop the key from a pending reveal group: the
                 // frontend's cleanup pushes carry no group, and a stale key
                 // here would let the group reveal resurrect glass for a view
@@ -855,7 +993,7 @@ impl MenuGlassManager {
                     // plain surfaces anchor the element rect itself.
                     let surface_rect = metaball
                         .as_ref()
-                        .map_or(rect, |metaball| metaball_canvas(rect, metaball.ball_radius));
+                        .map_or(rect, |metaball| metaball_canvas(rect, metaball_reach(metaball)));
                     let moved = !glass
                         .canvas
                         .iter()
@@ -882,6 +1020,19 @@ impl MenuGlassManager {
                         // surface height, which may have changed with the
                         // new rect; re-apply it.
                         glass.surface.set_corner_radius(glass.radius)?;
+                        // A held transform spec is expressed relative to the
+                        // canvas, so a canvas change re-applies it (CSS
+                        // semantics: the transform rides the element, not
+                        // one canvas size).
+                        if let Some(spec) =
+                            self.transforms
+                                .lock()
+                                .expect("transforms lock poisoned")
+                                .get(key)
+                                .cloned()
+                        {
+                            Self::apply_transform_spec(glass, &spec, true);
+                        }
                         Self::update_hit_rect(overlay, &self.hit_rects, key, &rect);
                     }
                     // The metaball field rides on top as pure constant-buffer
@@ -940,6 +1091,12 @@ impl MenuGlassManager {
                         glass.surface.set_corner_radius(radius)?;
                         glass.radius = radius;
                     }
+                    // Shape-preset changes reconfigure in place too (same
+                    // canvas geometry — only the drawn SDF switches).
+                    if glass.shape != shape {
+                        glass.surface.set_shape(shape.unwrap_or_default())?;
+                        glass.shape = shape;
+                    }
                     // A surface switching between fade styles gets its
                     // material re-seeded (glass_fade lives in the shader
                     // params).
@@ -973,7 +1130,7 @@ impl MenuGlassManager {
                     let overlay_host = overlay.0 as isize;
                     let surface_rect = metaball
                         .as_ref()
-                        .map_or(rect, |metaball| metaball_canvas(rect, metaball.ball_radius));
+                        .map_or(rect, |metaball| metaball_canvas(rect, metaball_reach(metaball)));
                     let match_index = recycled.iter().rposition(|pooled| {
                         pooled.local == local
                             && pooled.host == overlay_host
@@ -1067,8 +1224,10 @@ impl MenuGlassManager {
                                 small,
                                 fade: glass_fade,
                                 local,
+                                shape,
                                 metaball: metaball.clone(),
                                 metaball_generation: metaball_generation.unwrap_or(0),
+                                animated_transform: None,
                             }
                         }
                     }
@@ -1076,6 +1235,10 @@ impl MenuGlassManager {
                 // The recycled surface's height changed, so its normalized
                 // corner radius must be re-applied either way.
                 glass.surface.set_corner_radius(radius)?;
+                // ...and its shape preset re-applied (a pooled surface may
+                // carry another life's kind).
+                glass.surface.set_shape(shape.unwrap_or_default())?;
+                glass.shape = shape;
                 // A pooled surface may be re-used by a different panel size
                 // class or fade style than its previous life; re-seed its
                 // material when either changed.
@@ -1105,7 +1268,7 @@ impl MenuGlassManager {
                 // fresh one records its state here for the dedup below.
                 let surface_rect = metaball
                     .as_ref()
-                    .map_or(rect, |metaball| metaball_canvas(rect, metaball.ball_radius));
+                    .map_or(rect, |metaball| metaball_canvas(rect, metaball_reach(metaball)));
                 if let Some(metaball) = &metaball {
                     if glass.metaball.as_ref() != Some(metaball) || glass.canvas != surface_rect {
                         glass.surface.set_metaballs_field_px(
@@ -1138,6 +1301,20 @@ impl MenuGlassManager {
                 glass.radius = radius;
                 glass.key = key.to_owned();
                 glass.host = overlay.0 as isize;
+                // A fresh (or recycled) surface's life starts at the
+                // identity transform; a transform the key holds snaps on
+                // immediately (the menu re-opening with its transform is
+                // the CSS-authored state, not an animation).
+                glass.animated_transform = None;
+                if let Some(spec) = self
+                    .transforms
+                    .lock()
+                    .expect("transforms lock poisoned")
+                    .get(key)
+                    .cloned()
+                {
+                    Self::apply_transform_spec(&mut glass, &spec, false);
+                }
                 glasses.insert(key.to_owned(), glass);
                 Self::update_hit_rect(overlay, &self.hit_rects, key, &rect);
                 if group.is_some() {
@@ -1160,6 +1337,67 @@ impl MenuGlassManager {
             }
         }
         Ok(())
+    }
+
+    /// Animates (or re-states) a menu glass's CSS-style transform: the
+    /// drawn shape transitions from wherever it visually is into the spec's
+    /// target through the spec's cubic-bezier curve (see
+    /// [`GlassTransformAnimation`]). The spec is HELD per key: surfaces
+    /// created (or re-anchored) for the key afterwards snap to it, and a
+    /// re-stated identical target never restarts a running animation.
+    /// Unknown keys are a no-op (the surface may not exist yet; the held
+    /// spec applies on creation).
+    pub fn animate_menu_glass(
+        &self,
+        overlay: HWND,
+        key: &str,
+        animation: GlassTransformAnimation,
+    ) -> Result<(), String> {
+        // The overlay is not part of the lookup (keys are unique per
+        // surface); the parameter stays for API symmetry with the other
+        // manager operations and future host-scoping needs.
+        let _ = overlay;
+        self.transforms
+            .lock()
+            .expect("transforms lock poisoned")
+            .insert(key.to_owned(), animation.clone());
+        let mut glasses = self.glasses.lock().expect("menu glasses lock poisoned");
+        if let Some(glass) = glasses.get_mut(key) {
+            Self::apply_transform_spec(glass, &animation, true);
+        }
+        Ok(())
+    }
+
+    /// Converts a transform spec against a glass's canvas and applies it to
+    /// the surface. `animated` glides from the live transform through the
+    /// spec's easing (the CSS transition path); `!animated` snaps (fresh
+    /// surfaces, canvas re-anchors). Dedups against the last applied
+    /// target so re-stated specs never restart a settled (or running)
+    /// animation.
+    fn apply_transform_spec(glass: &mut MenuGlass, spec: &GlassTransformAnimation, animated: bool) {
+        let target = css_transform_to_engine(glass.canvas, spec.scale, spec.translate);
+        if glass.animated_transform == Some(target) {
+            return;
+        }
+        glass.animated_transform = Some(target);
+        let duration_secs = (spec.duration_ms.max(1.0) / 1000.0) as f32;
+        let delay_secs = (spec.delay_ms.max(0.0) / 1000.0) as f32;
+        let easing = [
+            spec.easing[0] as f32,
+            spec.easing[1] as f32,
+            spec.easing[2] as f32,
+            spec.easing[3] as f32,
+        ];
+        let result = if animated {
+            glass
+                .surface
+                .set_shape_transform_eased(target, duration_secs, easing, delay_secs)
+        } else {
+            glass.surface.set_shape_transform(target)
+        };
+        if let Err(error) = result {
+            eprintln!("glass-ui menu glass transform failed: {error}");
+        }
     }
 
     /// Starts the menu's squash-and-stretch scale spring from `from_w` to
@@ -1399,6 +1637,10 @@ impl MenuGlassManager {
                 .lock()
                 .expect("menu hit rects lock poisoned")
                 .remove(&key);
+            self.transforms
+                .lock()
+                .expect("transforms lock poisoned")
+                .remove(&key);
             self.remove_group_member(&key);
         }
     }
@@ -1486,12 +1728,16 @@ impl MenuGlassManager {
             .lock()
             .expect("ui hit rects lock poisoned")
             .clear();
+        self.transforms
+            .lock()
+            .expect("transforms lock poisoned")
+            .clear();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::metaball_canvas;
+    use super::{css_transform_to_engine, metaball_ball_reach, metaball_canvas};
 
     /// The canvas feeds both the surface's anchor rect and the metaball
     /// field's coordinate origin, so every component must survive the
@@ -1508,8 +1754,8 @@ mod tests {
             [0.25, 0.75, 100.5, 60.25],
             [-3.5, 7.2, 88.9, 12.4],
         ] {
-            for ball_radius in [0.0f32, 64.0, 121.5] {
-                let canvas = metaball_canvas(rect, ball_radius);
+            for reach in [0.0f32, 64.0, 121.5] {
+                let canvas = metaball_canvas(rect, reach);
                 assert!(
                     canvas.iter().all(|value| value.fract() == 0.0),
                     "canvas {canvas:?} is not on the integer pixel grid"
@@ -1529,5 +1775,89 @@ mod tests {
         let canvas = metaball_canvas([100.9, 100.1, 16.4, 16.6], 64.0);
         assert!((canvas[2] - (16.4 + 2.0 * (64.0 + 48.0))).abs() < 2.0);
         assert!((canvas[3] - (16.6 + 2.0 * (64.0 + 48.0))).abs() < 2.0);
+    }
+
+    /// The reach drives the canvas slack, so it must bound the silhouette:
+    /// the circle stays exact, and a shaped ball's bounding disc covers its
+    /// superellipse (which never leaves the hypot-of-extents disc).
+    #[test]
+    fn metaball_ball_reach_bounds_the_silhouette() {
+        for radius in [0.0f32, 24.0, 64.0] {
+            let circle = [0.0, 0.0, radius, radius, 1.0, 2.0];
+            assert_eq!(
+                metaball_ball_reach(circle),
+                radius,
+                "a circle ball's reach is exactly its radius"
+            );
+        }
+        let squircle = [0.0, 0.0, 64.0, 40.0, 1.0, 5.0];
+        let reach = metaball_ball_reach(squircle);
+        assert!(
+            reach >= (64.0f32 * 64.0 + 40.0 * 40.0).sqrt() - 1e-3,
+            "a shaped ball's reach is its bounding-disc corner distance"
+        );
+    }
+
+    /// The identity CSS transform must convert to the engine's identity:
+    /// no scale, no offset.
+    #[test]
+    fn css_transform_identity_maps_to_engine_identity() {
+        let canvas = [0.0, 0.0, 200.0, 100.0];
+        assert_eq!(
+            css_transform_to_engine(canvas, [1.0, 1.0], [0.0, 0.0]),
+            [1.0, 1.0, 0.0, 0.0]
+        );
+    }
+
+    /// A pure translate (center-anchored px) maps to an engine offset in
+    /// canvas-height units; the bottom-center anchor's ±0.5 terms cancel at
+    /// scale 1.
+    #[test]
+    fn css_translate_maps_to_height_units() {
+        let canvas = [0.0, 0.0, 200.0, 100.0];
+        // (50, -25) px on a 100px-tall canvas → (+0.5, -0.25) height units.
+        let converted = css_transform_to_engine(canvas, [1.0, 1.0], [50.0, -25.0]);
+        assert!((converted[2] - 0.5).abs() < 1e-6);
+        assert!((converted[3] + 0.25).abs() < 1e-6);
+    }
+
+    /// A pure scale (center-anchored) must keep the shape's CENTER at the
+    /// canvas center: verified through the shader's own mapping
+    /// `s = offset + anchor + (s' - anchor) * scale`.
+    #[test]
+    fn css_scale_keeps_the_center_anchored() {
+        let canvas = [0.0, 0.0, 200.0, 100.0];
+        for scale in [0.5_f64, 1.0, 1.4, 2.0] {
+            let [_, _, ox, oy] = css_transform_to_engine(canvas, [scale, scale], [0.0, 0.0]);
+            // The shape's center in s' is (0, 0); its landing spot in s:
+            let center_x = ox; // anchor.x = 0
+            let center_y = oy + 0.5 + (0.0 - 0.5) * scale as f32;
+            assert!(center_x.abs() < 1e-6, "scale {scale}: x {center_x}");
+            assert!(center_y.abs() < 1e-6, "scale {scale}: y {center_y}");
+        }
+    }
+
+    /// Scale + translate compose: the center lands exactly at the
+    /// translated position regardless of the scale (CSS composes
+    /// `translate` and `scale` with translate applied after — the offset
+    /// is unscaled in the engine too).
+    #[test]
+    fn css_scale_and_translate_compose() {
+        let canvas = [0.0, 0.0, 200.0, 100.0];
+        let [_, _, ox, oy] = css_transform_to_engine(canvas, [1.3, 0.8], [10.0, 4.0]);
+        let center_x = ox;
+        let center_y = oy + 0.5 + (0.0 - 0.5) * 0.8_f32;
+        assert!((center_x - 10.0 / 100.0).abs() < 1e-6);
+        assert!((center_y - 4.0 / 100.0).abs() < 1e-6);
+    }
+
+    /// A zero scale must not divide by zero: the y guard keeps the
+    /// conversion finite.
+    #[test]
+    fn css_zero_scale_is_guarded() {
+        let canvas = [0.0, 0.0, 200.0, 100.0];
+        let converted = css_transform_to_engine(canvas, [0.0, 0.0], [0.0, 0.0]);
+        assert!(converted.iter().all(|value| value.is_finite()));
+        assert_eq!(converted[1], 1e-4);
     }
 }

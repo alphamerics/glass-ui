@@ -1,29 +1,234 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import {
+  animateMenuGlass,
   positionMenuGlass,
   syncMenuGlasses,
+  type GlassShapeSpec,
   type MetaballField,
 } from "./bridge";
+import { easingCss, parseEasing, type GlassEasing } from "./easing";
 import { onDomMutations } from "./domWatch";
 
 const DEFAULT_RADIUS_PX = 20;
+const DEFAULT_TRANSFORM_DURATION_MS = 240;
 const TRACK_INTERVAL_MS = 120;
 const SWEEP_INTERVAL_MS = 1000;
 
+/** A CSS-style transform for the glass (and, for the component form, its
+ *  wrapper content): `scale` factors (a uniform number or `[x, y]`) and a
+ *  `translate` in CSS pixels — both center-anchored, like CSS's default
+ *  transform origin. Scale factors must be positive (the engine clamps at
+ *  a tiny positive epsilon); the translate rides at CSS px and is
+ *  converted to physical pixels for the native side. */
+export interface GlassTransform {
+  scale?: number | [number, number];
+  translate?: [number, number];
+}
+
+/** The transition timing applied when the transform target changes —
+ *  CSS `transition` semantics: duration, delay and a [`GlassEasing`]
+ *  curve (keywords, `cubic-bezier(...)` strings or control-point
+ *  arrays). Defaults: 240ms, no delay, `ease`. */
+export interface GlassTransformTiming {
+  durationMs?: number;
+  delayMs?: number;
+  easing?: GlassEasing;
+}
+
+/** Resolves a [`GlassTransform`] into uniform numbers (null = no
+ *  transform). Scale clamps to a tiny positive epsilon on both the DOM
+ *  and native sides so the two layers never disagree. */
+function resolveTransform(
+  transform?: GlassTransform,
+): { scale: [number, number]; translate: [number, number] } | null {
+  if (!transform) {
+    return null;
+  }
+  const rawScale = Array.isArray(transform.scale)
+    ? transform.scale
+    : [transform.scale ?? 1, transform.scale ?? 1];
+  const translate = transform.translate ?? [0, 0];
+  const finiteOr = (value: number | undefined, fallback: number): number =>
+    Number.isFinite(value) ? (value as number) : fallback;
+  return {
+    scale: [
+      Math.max(finiteOr(rawScale[0], 1), 1e-4),
+      Math.max(finiteOr(rawScale[1], finiteOr(rawScale[0], 1)), 1e-4),
+    ],
+    translate: [finiteOr(translate[0], 0), finiteOr(translate[1], 0)],
+  };
+}
+
+/**
+ * The shared transform animation: pushes the CSS-style target to the
+ * native compositor whenever it changes (CSS transition semantics — the
+ * glass glides from wherever it visually is into the target through the
+ * bezier curve), and returns the wrapper's inline style that plays the
+ * IDENTICAL curve on the DOM side, so glass and content move as one.
+ * Returns undefined when no transform is set (and, after one was set and
+ * then removed, the identity style with the transition kept, so the DOM
+ * eases back instead of snapping).
+ */
+export function useGlassTransform(
+  key: string,
+  transform?: GlassTransform,
+  timing?: GlassTransformTiming,
+): CSSProperties | undefined {
+  const resolved = resolveTransform(transform);
+  // Primitive descriptors keep the effects stable across re-renders (an
+  // inline object prop would re-fire them every render; the native side
+  // dedups, but the DOM style churn is avoidable noise).
+  const [scaleX, scaleY] = resolved?.scale ?? [1, 1];
+  const [translateX, translateY] = resolved?.translate ?? [0, 0];
+  const durationMs = timing?.durationMs ?? DEFAULT_TRANSFORM_DURATION_MS;
+  const delayMs = timing?.delayMs ?? 0;
+  const easing = parseEasing(timing?.easing);
+  const targetKey = resolved
+    ? `${scaleX},${scaleY},${translateX},${translateY}`
+    : "";
+  const timingKey = `${durationMs},${delayMs},${easing.join(",")}`;
+
+  const everActiveRef = useRef(resolved != null);
+  useEffect(() => {
+    if (resolved) {
+      everActiveRef.current = true;
+    }
+  });
+
+  useEffect(() => {
+    // An empty key means "inactive" (the useLiquidGlassSurface hook gates
+    // closed menus through it): no surface exists to animate.
+    if (!key) {
+      return;
+    }
+    if (!resolved) {
+      // The prop was removed: transition back to the identity — but only
+      // when a transform was actually held (a surface mounted without one
+      // has nothing to ease back, and no IPC to spend on it). The native
+      // side dedups when it already sits at the identity.
+      if (!everActiveRef.current) {
+        return;
+      }
+      void animateMenuGlass(key, {
+        durationMs,
+        delayMs,
+        easing,
+        scale: [1, 1],
+        translate: [0, 0],
+      });
+      return;
+    }
+    // The native translate speaks physical pixels (like the rect pushes).
+    const deviceScale = window.devicePixelRatio || 1;
+    void animateMenuGlass(key, {
+      durationMs,
+      delayMs,
+      easing,
+      scale: [scaleX, scaleY],
+      translate: [translateX * deviceScale, translateY * deviceScale],
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the primitive
+    // descriptors above ARE the dependency set (object props re-memo).
+  }, [key, targetKey, timingKey]);
+
+  if (!resolved) {
+    // Keep the transition alive after a removal so the DOM eases back to
+    // the identity instead of snapping.
+    return everActiveRef.current
+      ? {
+          transform: "none",
+          transition: transformTransition(durationMs, delayMs, easing),
+        }
+      : undefined;
+  }
+  return {
+    transform: `translate(${translateX}px, ${translateY}px) scale(${scaleX}, ${scaleY})`,
+    transition: transformTransition(durationMs, delayMs, easing),
+    willChange: "transform",
+  };
+}
+
+/**
+ * The wrapper's inline `transition` while a transform is active: the
+ * transform rides the spec's curve — and the stylesheet's own opacity
+ * fade (the fade/glass-fade content transitions) is preserved alongside,
+ * since an inline `transition` would otherwise replace it.
+ */
+function transformTransition(
+  durationMs: number,
+  delayMs: number,
+  easing: [number, number, number, number],
+): string {
+  return `transform ${durationMs}ms ${easingCss(easing)} ${delayMs}ms, opacity 160ms ease`;
+}
+
+/**
+ * The wrapper's LAYOUT rect (transforms excluded), derived from its visual
+ * rect and the computed CSS transform matrix. When the component drives
+ * the wrapper's transform, the native glass applies the same transform
+ * itself — the pushed rect must be the untransformed box, or the two
+ * would compound (the tracking loop follows the visual rect otherwise).
+ * Exact for translate + scale about any origin (the matrix components
+ * carry both); bails out to the visual rect for anything else.
+ */
+function layoutRect(node: HTMLElement): {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+} {
+  const rect = node.getBoundingClientRect();
+  const matrix = getComputedStyle(node).transform;
+  const match = matrix.match(/^matrix\((.+)\)$/);
+  if (!match) {
+    return rect;
+  }
+  const [a, b, c, d, e, f] = match[1].split(",").map(Number);
+  if (
+    ![a, b, c, d, e, f].every(Number.isFinite) ||
+    a <= 0 ||
+    d <= 0 ||
+    b !== 0 ||
+    c !== 0
+  ) {
+    // Non-finite entries, a collapsed axis, or rotation/skew/mirror — the
+    // untransform is not exact, so best-effort follow the visual rect.
+    return rect;
+  }
+  const width = rect.width / Math.abs(a);
+  const height = rect.height / Math.abs(d);
+  const centerX = (rect.left + rect.width / 2 - e) / a;
+  const centerY = (rect.top + rect.height / 2 - f) / d;
+  return {
+    left: centerX - width / 2,
+    top: centerY - height / 2,
+    width,
+    height,
+  };
+}
+
 /* ---- The shared metaball field ----
  * Every metaball-flagged surface registers a live getter for its own ball
- * (its element's center + the configured radius). Each metaball surface
- * pushes the WHOLE field to its own native surface, so metaball containers
- * merge with each other — and only with each other; plain shapes never
- * join the field. `metaballVersion` bumps whenever any ball may have
- * moved, so the other metaball surfaces re-push their (now stale) field
- * copy; each surface dedups its pushes against the version it last sent. */
+ * (its element's silhouette: center, superellipse half-extents, shape
+ * exponent). Each metaball surface pushes the WHOLE field to its own
+ * native surface, so metaball containers merge with each other — and only
+ * with each other; plain shapes never join the field. `metaballVersion`
+ * bumps whenever any ball may have moved, so the other metaball surfaces
+ * re-push their (now stale) field copy; each surface dedups its pushes
+ * against the version it last sent. */
 interface MetaballBall {
   x: number;
   y: number;
-  r: number;
+  /** The ball's superellipse half-extents (CSS px) — the element's
+   *  silhouette scaled to the ball radius. Equal extents with exponent 2
+   *  is the plain circle. */
+  ex: number;
+  ey: number;
+  /** Contribution weight (always 1 today). */
   w: number;
+  /** The ball's superellipse exponent (2 = circle/ellipse). */
+  e: number;
 }
 
 const metaballBalls = new Map<string, () => MetaballBall | null>();
@@ -103,8 +308,61 @@ function fadesContent(transition: GlassTransition): boolean {
  *    sits over the app's own content needs no screen duplication. */
 export type GlassBackdrop = "global" | "local";
 
+/** The surface's own shape — one prop declares the glass's silhouette,
+ *  and `metaball` is the orthogonal merge toggle (a merging surface's
+ *  ball DERIVES from this shape, so the shape is declared exactly once):
+ *  - `"container"` the rounded rect of `radiusPx` (the default look),
+ *  - `"pill"`      the full capsule (round ends; `"circle"` is its alias),
+ *  - `{ superellipse: n }` the squircle of exponent `n` (2 = ellipse,
+ *    4..6 the iOS-style squircle, higher approaches a box). */
+export type GlassSurfaceShape =
+  | "container"
+  | "pill"
+  | "circle"
+  | { superellipse: number };
+
 function pushesLocal(backdrop?: GlassBackdrop): boolean {
   return backdrop === "local";
+}
+
+/** The wire shape spec (rounded | superellipse): pill/circle are rounded
+ *  rects with a full-height corner radius, so they ride on `radiusPx`. */
+function wireShape(
+  shapeKind: "container" | "pill" | "superellipse",
+  shapeExponent: number | undefined,
+): GlassShapeSpec | undefined {
+  return shapeKind === "superellipse"
+    ? { kind: "superellipse", exponent: shapeExponent ?? 5 }
+    : undefined;
+}
+
+/** The metaball ball's superellipse exponent, derived from the surface's
+ *  own declared shape (and its rect for the fitted looks):
+ *  - `{ superellipse: n }` is taken verbatim,
+ *  - `"pill"`: a square element's capsule IS a circle (exponent 2); wide
+ *    ones fit a boxier superellipse (a stadium is not a superellipse —
+ *    this is the documented silhouette approximation),
+ *  - `"container"`: the corner-radius ratio maps through the standard
+ *    squircle fit (ratio ~0.22, the iOS icon, lands near 5.5; a full
+ *    capsule collapses to the circle). */
+function ballExponent(
+  shapeKind: "container" | "pill" | "superellipse",
+  shapeExponent: number | undefined,
+  radiusPx: number,
+  width: number,
+  height: number,
+): number {
+  if (shapeKind === "superellipse") {
+    return shapeExponent ?? 5;
+  }
+  const major = Math.max(width, height);
+  const minor = Math.min(width, height);
+  if (shapeKind === "pill") {
+    return major > 0 ? 2 + 4 * (1 - minor / major) : 2;
+  }
+  const half = minor / 2;
+  const ratio = half > 0 ? Math.min(radiusPx, half) / half : 1;
+  return Math.min(32, 1 + 1 / Math.max(ratio, 1 / 31));
 }
 
 function pushRect(
@@ -117,6 +375,7 @@ function pushRect(
   spring?: boolean,
   local?: boolean,
   metaball?: MetaballField,
+  shape?: GlassShapeSpec,
 ): void {
   const rect = node.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
@@ -135,6 +394,7 @@ function pushRect(
     spring,
     local,
     metaball,
+    shape,
   );
 }
 
@@ -145,6 +405,13 @@ function pushRect(
  * animates or reflows. `key` names this menu's own glass instance; when the
  * menu closes the instance is deleted. `transition` selects the appearance
  * (see [`GlassTransition`]); the legacy `instant` boolean is kept as an alias.
+ *
+ * `transform`/`transformTiming` animate the GLASS's shape with CSS
+ * semantics (see [`GlassTransform`]). This hook animates the native glass
+ * only — the tracked element is the caller's, so animating its DOM is the
+ * caller's move (apply the same CSS transition to the element and the two
+ * layers move as one; the [`LiquidGlassSurface`] component form does this
+ * automatically).
  */
 export function useLiquidGlassSurface(
   active: boolean,
@@ -155,9 +422,15 @@ export function useLiquidGlassSurface(
   transition?: GlassTransition,
   spring?: boolean,
   backdrop?: GlassBackdrop,
+  shape?: GlassShapeSpec,
+  transform?: GlassTransform,
+  transformTiming?: GlassTransformTiming,
 ): void {
   const resolved = transition ?? (instant ? "instant" : "reveal");
   const local = pushesLocal(backdrop);
+  // A closed menu has no surface to animate: gate the transform effect
+  // through an empty key.
+  useGlassTransform(active ? key : "", transform, transformTiming);
 
   useEffect(() => {
     registerGlassKey(key);
@@ -185,6 +458,8 @@ export function useLiquidGlassSurface(
           isGlassFade(resolved),
           spring,
           local,
+          undefined,
+          shape,
         );
       }
     };
@@ -219,7 +494,7 @@ export function useLiquidGlassSurface(
       unregisterGlassKey(key);
       void positionMenuGlass(key, null);
     };
-  }, [active, selector, radiusPx, key, resolved, spring, local]);
+  }, [active, selector, radiusPx, key, resolved, spring, local, shape]);
 }
 
 /**
@@ -227,6 +502,17 @@ export function useLiquidGlassSurface(
  * behind it. The glass inherits the wrapper's rendered size and position and
  * follows it as it changes. `transition` controls the appearance (see
  * [`GlassTransition`]); the legacy `instant` boolean is kept as an alias.
+ *
+ * `transform`/`transformTiming` give the glass a CSS-style animated
+ * transform (see [`GlassTransform`]): the native shape glides through the
+ * bezier curve at the compositor's rate while the wrapper element plays
+ * the IDENTICAL curve as a real CSS transition — glass and content move as
+ * one. The transform target persists (CSS transition semantics: a changed
+ * target glides from wherever the glass visually is); removing the prop
+ * eases back to the identity. While a transform is active the pushed glass
+ * rect is the wrapper's UNTRANSFORMED layout box (the native side applies
+ * the same transform itself, so the two never compound), and the inline
+ * `transform`/`transition` styles override the `style` prop's own.
  */
 export function LiquidGlassSurface({
   className,
@@ -236,9 +522,12 @@ export function LiquidGlassSurface({
   instant,
   group,
   backdrop,
+  shape = "container",
   metaball = false,
   metaballRadiusPx,
   metaballTension = 2,
+  transform,
+  transformTiming,
   children,
 }: {
   className?: string;
@@ -251,17 +540,27 @@ export function LiquidGlassSurface({
   group?: string;
   /** Which feed paints the backdrop (see [`GlassBackdrop`]). */
   backdrop?: GlassBackdrop;
+  /** The surface's own silhouette (see [`GlassSurfaceShape`]): one prop
+   *  declares the shape, `metaball` is the orthogonal merge toggle. */
+  shape?: GlassSurfaceShape;
+  /** The CSS-style animated transform (see [`GlassTransform`]): the glass
+   *  and this wrapper's content transition together. */
+  transform?: GlassTransform;
+  /** The transform transition's timing (see [`GlassTransformTiming`]). */
+  transformTiming?: GlassTransformTiming;
   /** Renders this surface as a METABALL container: the drawn shape becomes
-   *  the shared metaball field (a liquid blob of radius `metaballRadiusPx`
-   *  centered on this element) instead of the shape preset. Metaball
-   *  containers merge with each other — and only with each other — as
-   *  their elements approach; plain shapes never join the field. The
-   *  anchored element may be far smaller than its blob (a tiny draggable
-   *  dot): the native canvas grows around it so the blob and its merged
-   *  necks render in full. */
+   *  the shared metaball field (a liquid blob whose ball inherits THIS
+   *  surface's `shape` and silhouette) instead of the shape preset.
+   *  Metaball containers merge with each other — and only with each
+   *  other — as their elements approach; plain shapes never join the
+   *  field. The anchored element may be far smaller than its blob (a tiny
+   *  draggable dot): the native canvas grows around it so the blob and
+   *  its merged necks render in full. */
   metaball?: boolean;
-  /** This element's ball radius in CSS pixels. Defaults to half the
-   *  element's smaller dimension (the element circumscribed). */
+  /** This element's ball radius in CSS pixels — the minor-axis half-extent
+   *  the ball's silhouette scales to. Defaults to half the element's
+   *  smaller dimension (the element circumscribed: the ball IS the
+   *  element's shape). */
   metaballRadiusPx?: number;
   /** The field's tension exponent (2 = the classic metaball blend; higher
    *  values merge tighter and rounder, lower ones stretch long necks). */
@@ -271,6 +570,28 @@ export function LiquidGlassSurface({
   const surfaceId = useId();
   const resolved = transition ?? (instant ? "instant" : "reveal");
   const local = pushesLocal(backdrop);
+  // The transform's DOM style (undefined = inactive) and a flag the push
+  // loop reads to measure the wrapper's UNTRANSFORMED layout box while a
+  // transform is active (the native glass applies the same transform, so
+  // following the visual rect would compound the two).
+  const transformStyle = useGlassTransform(surfaceId, transform, transformTiming);
+  const transformActiveRef = useRef(transformStyle != null);
+  transformActiveRef.current = transformStyle != null;
+  // Stable primitive shape descriptors: the effect's dependencies (an
+  // inline `{ superellipse: n }` object would re-run it every render).
+  const shapeKind: "container" | "pill" | "superellipse" =
+    typeof shape === "object"
+      ? "superellipse"
+      : shape === "circle"
+        ? "pill"
+        : shape;
+  const shapeExponent = typeof shape === "object" ? shape.superellipse : undefined;
+  // The pushed corner radius: a pill is a rounded rect whose radius the
+  // native side clamps to the full capsule.
+  const pushedRadius = shapeKind === "pill" ? 1e6 : radiusPx;
+  // The wire shape spec: pill/container ride on the corner radius, only
+  // the superellipse preset needs the engine's kind switch.
+  const shapeSpec = wireShape(shapeKind, shapeExponent);
   // Content-fading modes: the content starts invisible and eases in once
   // mounted (the double frame wait guarantees the hidden state paints first).
   const [hidden, setHidden] = useState(fadesContent(resolved));
@@ -305,20 +626,28 @@ export function LiquidGlassSurface({
       if (!node) {
         return;
       }
-      const rect = node.getBoundingClientRect();
+      // While a transform is active the glass rect must be the wrapper's
+      // UNTRANSFORMED layout box: the native glass applies the same
+      // transform itself, so following the visual (transformed) rect
+      // would compound the two.
+      const rect = transformActiveRef.current
+        ? layoutRect(node)
+        : node.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) {
         return;
       }
       if (!metaball) {
         pushRect(
           node,
-          radiusPx,
+          pushedRadius,
           surfaceId,
           pushesInstant(resolved),
           group,
           isGlassFade(resolved),
           undefined,
           local,
+          undefined,
+          shapeSpec,
         );
         return;
       }
@@ -326,7 +655,8 @@ export function LiquidGlassSurface({
       // own movement bumps the shared version, so sibling metaball
       // surfaces refresh their (now stale) field copies; each surface
       // dedups against the version it last sent.
-      const ballRadius = metaballRadiusPx ?? Math.min(rect.width, rect.height) / 2;
+      const minorHalf = Math.min(rect.width, rect.height) / 2;
+      const ballRadius = metaballRadiusPx ?? minorHalf;
       const ballKey = [
         rect.left.toFixed(1),
         rect.top.toFixed(1),
@@ -343,15 +673,22 @@ export function LiquidGlassSurface({
         return;
       }
       lastPushedVersion = metaballVersion;
-      const scale = window.devicePixelRatio || 1;
+      const deviceScale = window.devicePixelRatio || 1;
       // Each metaball surface's field copy carries ITS OWN ball FIRST
       // (index 0) — the native territory clip renders the merged blob only
       // where the own ball dominates, so the sharing surfaces tile it
       // exactly instead of double-compositing their canvases' overlap.
-      const balls: Array<[number, number, number, number]> = [];
+      const balls: MetaballField["balls"] = [];
       const ownBall = metaballBalls.get(surfaceId)?.() ?? null;
       if (ownBall) {
-        balls.push([ownBall.x * scale, ownBall.y * scale, ownBall.r * scale, ownBall.w]);
+        balls.push([
+          ownBall.x * deviceScale,
+          ownBall.y * deviceScale,
+          ownBall.ex * deviceScale,
+          ownBall.ey * deviceScale,
+          ownBall.w,
+          ownBall.e,
+        ]);
       }
       for (const [key, getBall] of metaballBalls) {
         if (key === surfaceId) {
@@ -359,12 +696,19 @@ export function LiquidGlassSurface({
         }
         const ball = getBall();
         if (ball) {
-          balls.push([ball.x * scale, ball.y * scale, ball.r * scale, ball.w]);
+          balls.push([
+            ball.x * deviceScale,
+            ball.y * deviceScale,
+            ball.ex * deviceScale,
+            ball.ey * deviceScale,
+            ball.w,
+            ball.e,
+          ]);
         }
       }
       pushRect(
         node,
-        radiusPx,
+        pushedRadius,
         surfaceId,
         pushesInstant(resolved),
         group,
@@ -372,6 +716,7 @@ export function LiquidGlassSurface({
         undefined,
         local,
         { radius: ballRadius, balls, tension: metaballTension },
+        shapeSpec,
       );
       // This surface's own ball moved: the siblings' field copies are
       // stale NOW, not at their next tracking tick — schedule their
@@ -405,11 +750,22 @@ export function LiquidGlassSurface({
         if (rect.width < 1 || rect.height < 1) {
           return null;
         }
+        const minorHalf = Math.min(rect.width, rect.height) / 2;
+        const ballRadius = metaballRadiusPx ?? minorHalf;
+        const ballScale = minorHalf > 0 ? ballRadius / minorHalf : 1;
         return {
           x: rect.left + rect.width / 2,
           y: rect.top + rect.height / 2,
-          r: metaballRadiusPx ?? Math.min(rect.width, rect.height) / 2,
+          ex: (rect.width / 2) * ballScale,
+          ey: (rect.height / 2) * ballScale,
           w: 1,
+          e: ballExponent(
+            shapeKind,
+            shapeExponent,
+            radiusPx,
+            rect.width,
+            rect.height,
+          ),
         };
       });
       metaballListeners.add(schedulePush);
@@ -439,14 +795,25 @@ export function LiquidGlassSurface({
       // Unused: delete this menu's own glass instance.
       void positionMenuGlass(surfaceId, null);
     };
-  }, [surfaceId, radiusPx, resolved, group, local, metaball, metaballRadiusPx, metaballTension]);
+  }, [
+    surfaceId,
+    radiusPx,
+    resolved,
+    group,
+    local,
+    metaball,
+    metaballRadiusPx,
+    metaballTension,
+    shapeKind,
+    shapeExponent,
+  ]);
 
   return (
     <div
       data-liquid-glass-surface={surfaceId}
       data-glass-hidden={hidden || undefined}
       className={className}
-      style={style}
+      style={transformStyle ? { ...style, ...transformStyle } : style}
     >
       {children}
     </div>

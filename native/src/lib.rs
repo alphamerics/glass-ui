@@ -26,9 +26,9 @@ pub mod commands;
 
 pub use liquid_glass::RevealAnimation;
 pub use manager::{
-    small_surface_params, spring_constants, spring_step, MenuGlassManager, MetaballPush,
+    small_surface_params, spring_constants, spring_step, GlassTransformAnimation,
+    MenuGlassManager, MetaballPush,
 };
-
 /// The default menu reveal: a liquid bubble from the bottom center
 /// (menus anchored to a bar or trigger at the bottom of the overlay grow
 /// upward out of it).

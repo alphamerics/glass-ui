@@ -54,6 +54,7 @@ tauri::Builder::default()
         commands::set_ui_hit_rects,
         commands::prewarm_menu_glass,
         commands::position_menu_glass,
+        commands::animate_menu_glass,
         commands::sync_menu_glasses,
         commands::log_message,
     ])

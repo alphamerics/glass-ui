@@ -5,6 +5,7 @@
  * Tauri webview (the browser preview), so the components work anywhere.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { parseEasing, type GlassEasing } from "./easing";
 
 /** A menu glass rect, in physical pixels relative to the overlay's top-left. */
 export interface MenuGlassRect {
@@ -26,13 +27,25 @@ export async function setUiHitRects(rects: MenuGlassRect[]): Promise<void> {
   }
 }
 
+/** The surface's own shape preset, mirrored from the engine's `GlassShape`:
+ *  "rounded" draws the corner-radius rounded rect (the default), and
+ *  "superellipse" draws the squircle of `exponent` (2 = ellipse, 4..6 the
+ *  iOS-style squircle, higher approaches a box). Pill/circle looks need no
+ *  wire shape — they are rounded rects with a full-height corner radius. */
+export interface GlassShapeSpec {
+  kind: "rounded" | "superellipse";
+  exponent?: number;
+}
+
 /** A metaball element's field payload: the element's own ball radius plus
  *  the WHOLE shared field (every metaball element's ball, window-relative
- *  physical px, each `[x, y, radius, weight]`), so metaball surfaces merge
- *  with each other. */
+ *  physical px, each `[x, y, extentX, extentY, weight, exponent]` — the
+ *  ball's superellipse half-extents and shape exponent, exponent 2 with
+ *  equal extents the plain circle), so metaball surfaces merge with each
+ *  other. */
 export interface MetaballField {
   radius: number;
-  balls: Array<[number, number, number, number]>;
+  balls: Array<[number, number, number, number, number, number]>;
   tension: number;
 }
 
@@ -42,8 +55,9 @@ export interface MetaballField {
  * the overlay's top-left corner. `local` feeds the surface from the host
  * window's own capture instead of the shared monitor capture: glass that
  * only ever sits over the app's own content (an in-app card, control or
- * panel) needs no screen duplication at all. `metaball` renders the surface
- * as a metaball container instead of the shape preset.
+ * panel) needs no screen duplication at all. `shape` selects the surface's
+ * own preset beyond the rounded rect. `metaball` renders the surface as a
+ * metaball container instead of the shape preset.
  */
 export async function positionMenuGlass(
   key: string,
@@ -54,6 +68,7 @@ export async function positionMenuGlass(
   spring?: boolean,
   local?: boolean,
   metaball?: MetaballField,
+  shape?: GlassShapeSpec,
 ): Promise<void> {
   try {
     await invoke("position_menu_glass", {
@@ -67,6 +82,9 @@ export async function positionMenuGlass(
       glassFade: glassFade ?? false,
       spring: spring ?? false,
       local: local ?? false,
+      shapeKind: shape?.kind === "superellipse" ? 1 : null,
+      shapeExponent:
+        shape?.kind === "superellipse" ? (shape.exponent ?? 5) : null,
       metaball: metaball != null,
       metaballRadius: metaball?.radius ?? null,
       metaballBalls: metaball?.balls ?? null,
@@ -107,6 +125,47 @@ export async function prewarmMenuGlass(count: number): Promise<void> {
 export async function syncMenuGlasses(keys: string[]): Promise<void> {
   try {
     await invoke("sync_menu_glasses", { keys });
+  } catch {
+    // The browser preview does not expose native glass.
+  }
+}
+
+/** The wire form of a CSS-style glass transform animation: `scale` factors,
+ *  `translate` in PHYSICAL pixels (center-anchored, like CSS's default
+ *  transform origin), animated over `durationMs` after `delayMs` through
+ *  the cubic-bezier `easing`. See [`animateMenuGlass`]. */
+export interface GlassTransformAnimationSpec {
+  durationMs?: number;
+  delayMs?: number;
+  easing?: GlassEasing;
+  scale: [number, number];
+  translate: [number, number];
+}
+
+/**
+ * Animates a menu glass's transform with CSS semantics: the drawn shape
+ * transitions from wherever it visually is into the spec's target through
+ * the spec's bezier curve (one IPC call — the compositor integrates the
+ * tween at the render loop's rate). The spec is HELD per key: surfaces
+ * created for the key afterwards snap to it, and re-stating an identical
+ * target never restarts a running animation. No-ops outside a Tauri
+ * webview (the browser preview).
+ */
+export async function animateMenuGlass(
+  key: string,
+  spec: GlassTransformAnimationSpec,
+): Promise<void> {
+  try {
+    await invoke("animate_menu_glass", {
+      key,
+      animation: {
+        durationMs: spec.durationMs ?? 240,
+        delayMs: spec.delayMs ?? 0,
+        easing: parseEasing(spec.easing),
+        scale: spec.scale,
+        translate: spec.translate,
+      },
+    });
   } catch {
     // The browser preview does not expose native glass.
   }

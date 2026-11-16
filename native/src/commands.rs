@@ -12,6 +12,7 @@
 //!         commands::set_ui_hit_rects,
 //!         commands::prewarm_menu_glass,
 //!         commands::position_menu_glass,
+//!         commands::animate_menu_glass,
 //!         commands::sync_menu_glasses,
 //!         commands::log_message,
 //!     ])
@@ -85,10 +86,15 @@ pub fn prewarm_menu_glass(
 /// `local` feeds the surface from the host window's own capture instead of
 /// the shared monitor capture (in-app glass).
 ///
+/// `shape_kind`/`shape_exponent` select the surface's own preset: 0 (or
+/// absent) is the rounded rect of `rect_radius`, 1 draws the superellipse
+/// (squircle) of `shape_exponent`.
+///
 /// `metaball` turns the surface into a metaball container: the drawn shape
 /// becomes the shared metaball field instead of the shape preset.
 /// `metaball_balls` carries the WHOLE field (every metaball element's ball,
-/// window-relative physical px, each `(x, y, radius, weight)`) so metaball
+/// window-relative physical px, each `(x, y, extentX, extentY, weight,
+/// exponent)` — exponent 2 with equal extents the plain circle) so metaball
 /// containers merge with each other; `metaball_radius` is this element's own
 /// ball radius (the anchored element may be a tiny dot) and
 /// `metaball_tension` the field's merge exponent (2 = the classic blend).
@@ -105,13 +111,21 @@ pub fn position_menu_glass(
     group: Option<String>,
     spring: Option<bool>,
     local: Option<bool>,
+    shape_kind: Option<f64>,
+    shape_exponent: Option<f64>,
     metaball: Option<bool>,
     metaball_radius: Option<f64>,
-    metaball_balls: Option<Vec<[f64; 4]>>,
+    metaball_balls: Option<Vec<[f64; 6]>>,
     metaball_tension: Option<f64>,
 ) -> Result<(), String> {
     let rect = rect.map(|r| [r.x as f32, r.y as f32, r.width as f32, r.height as f32]);
     let radius = rect_radius.unwrap_or(20.0) as f32;
+    let shape = match shape_kind {
+        Some(1.0) => Some(liquid_glass::GlassShape::Superellipse {
+            exponent: shape_exponent.unwrap_or(5.0) as f32,
+        }),
+        _ => None,
+    };
     let metaball = metaball.unwrap_or(false).then(|| crate::MetaballPush {
         ball_radius: metaball_radius.unwrap_or(24.0) as f32,
         balls: metaball_balls.unwrap_or_default(),
@@ -127,6 +141,7 @@ pub fn position_menu_glass(
         group.as_deref(),
         spring.unwrap_or(false),
         local.unwrap_or(false),
+        shape,
         metaball,
     )
 }
@@ -144,6 +159,24 @@ pub fn sync_menu_glasses(
 ) {
     let host = window.hwnd().map(|hwnd| hwnd.0 as isize).unwrap_or(0);
     state.sync_glasses(&keys, host);
+}
+
+/// Animates (or re-states) a menu glass's CSS-style transform: the drawn
+/// shape transitions into `animation`'s target through its cubic-bezier
+/// curve (see [`crate::GlassTransformAnimation`]). The spec is held per
+/// key, so surfaces created for the key afterwards snap to it.
+#[tauri::command]
+pub fn animate_menu_glass(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, MenuGlassManager>,
+    key: String,
+    animation: crate::GlassTransformAnimation,
+) -> Result<(), String> {
+    state.animate_menu_glass(
+        windows::Win32::Foundation::HWND(window.hwnd().map_err(|e| e.to_string())?.0 as *mut _),
+        &key,
+        animation,
+    )
 }
 
 /// Forwards a message from the web UI to the native log.

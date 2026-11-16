@@ -10,11 +10,18 @@
  *   1. `import "glass-ui/styles.css"` once at the app root.
  *   2. Register the native commands from `glass-ui`'s Rust crate
  *      (`glass-ui` crate, feature "tauri"): position_menu_glass,
- *      sync_menu_glasses, prewarm_menu_glass, set_ui_hit_rects, log_message.
+ *      animate_menu_glass, sync_menu_glasses, prewarm_menu_glass,
+ *      set_ui_hit_rects, log_message.
  *   3. Ship a glass-broker.exe beside the app executable.
  */
-export { LiquidGlassSurface, useLiquidGlassSurface, notifyMetaballs } from "./LiquidGlassSurface";
-export type { GlassTransition, GlassBackdrop } from "./LiquidGlassSurface";
+export { LiquidGlassSurface, useLiquidGlassSurface, useGlassTransform, notifyMetaballs } from "./LiquidGlassSurface";
+export type {
+  GlassTransition,
+  GlassBackdrop,
+  GlassSurfaceShape,
+  GlassTransform,
+  GlassTransformTiming,
+} from "./LiquidGlassSurface";
 export { LiquidDropdown } from "./LiquidDropdown";
 export type { LiquidDropdownItem } from "./LiquidDropdown";
 export { LiquidMenuItems } from "./LiquidMenuItems";
@@ -24,10 +31,18 @@ export { GlassCard } from "./GlassCard";
 export type { GlassShape } from "./GlassCard";
 export {
   positionMenuGlass,
+  animateMenuGlass,
   syncMenuGlasses,
   setUiHitRects,
   prewarmMenuGlass,
   logUi,
 } from "./bridge";
-export type { MenuGlassRect } from "./bridge";
+export type {
+  MenuGlassRect,
+  GlassShapeSpec,
+  MetaballField,
+  GlassTransformAnimationSpec,
+} from "./bridge";
+export { parseEasing, easingCss, GLASS_EASING_PRESETS } from "./easing";
+export type { GlassEasing } from "./easing";
 export { onDomMutations } from "./domWatch";
