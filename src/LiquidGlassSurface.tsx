@@ -4,6 +4,7 @@ import {
   animateMenuGlass,
   positionMenuGlass,
   syncMenuGlasses,
+  type GlassMaterialOverride,
   type GlassShapeSpec,
   type MetaballField,
 } from "./bridge";
@@ -198,8 +199,12 @@ function layoutRect(node: HTMLElement): {
   }
   const width = rect.width / Math.abs(a);
   const height = rect.height / Math.abs(d);
-  const centerX = (rect.left + rect.width / 2 - e) / a;
-  const centerY = (rect.top + rect.height / 2 - f) / d;
+  // A scale about the center keeps the center fixed, so the layout center
+  // is the visual center minus the translation — no un-scaling of the
+  // coordinate (dividing by a/d here would shrink the center coordinate by
+  // the scale factor and misplace the box).
+  const centerX = rect.left + rect.width / 2 - e;
+  const centerY = rect.top + rect.height / 2 - f;
   return {
     left: centerX - width / 2,
     top: centerY - height / 2,
@@ -366,7 +371,7 @@ function ballExponent(
 }
 
 function pushRect(
-  node: HTMLElement,
+  rect: { left: number; top: number; width: number; height: number },
   radiusPx: number,
   key: string,
   instant?: boolean,
@@ -376,8 +381,8 @@ function pushRect(
   local?: boolean,
   metaball?: MetaballField,
   shape?: GlassShapeSpec,
+  material?: GlassMaterialOverride,
 ): void {
-  const rect = node.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
   void positionMenuGlass(
     key,
@@ -386,7 +391,10 @@ function pushRect(
       y: rect.top * scale,
       width: rect.width * scale,
       height: rect.height * scale,
-      radius: radiusPx,
+      // The rect speaks physical pixels and the native side normalizes the
+      // radius against the surface's PHYSICAL height — so the radius rides
+      // in the same units, or capsules go square at DPI scaling.
+      radius: radiusPx * scale,
     },
     instant,
     group,
@@ -395,6 +403,7 @@ function pushRect(
     local,
     metaball,
     shape,
+    material,
   );
 }
 
@@ -405,6 +414,10 @@ function pushRect(
  * animates or reflows. `key` names this menu's own glass instance; when the
  * menu closes the instance is deleted. `transition` selects the appearance
  * (see [`GlassTransition`]); the legacy `instant` boolean is kept as an alias.
+ *
+ * `material` pins the surface's glass material to per-surface custom
+ * properties (see [`GlassMaterialOverride`]): the surface stops following
+ * the app's shared material for every set field.
  *
  * `transform`/`transformTiming` animate the GLASS's shape with CSS
  * semantics (see [`GlassTransform`]). This hook animates the native glass
@@ -425,32 +438,56 @@ export function useLiquidGlassSurface(
   shape?: GlassShapeSpec,
   transform?: GlassTransform,
   transformTiming?: GlassTransformTiming,
+  material?: GlassMaterialOverride,
 ): void {
   const resolved = transition ?? (instant ? "instant" : "reveal");
   const local = pushesLocal(backdrop);
   // A closed menu has no surface to animate: gate the transform effect
   // through an empty key.
-  useGlassTransform(active ? key : "", transform, transformTiming);
+  const transformStyle = useGlassTransform(active ? key : "", transform, transformTiming);
+  // The material override's primitive descriptor: the effect's dependency
+  // (an inline object prop would re-run the push effect every render).
+  const materialKey = material ? JSON.stringify(material) : "";
+  // The push loop reads this to measure the tracked element's UNTRANSFORMED
+  // layout box while a transform is active (the native glass applies the
+  // same transform itself, so following the visual rect would compound the
+  // two). A ref keeps the push effect's dependencies free of the transform.
+  const transformActiveRef = useRef(transformStyle != null);
+  transformActiveRef.current = transformStyle != null;
 
   useEffect(() => {
     registerGlassKey(key);
     if (!active) {
-      void positionMenuGlass(key, null);
+      void positionMenuGlass(
+        key,
+        null,
+        pushesInstant(resolved),
+        undefined,
+        isGlassFade(resolved),
+      );
       return () => {
         unregisterGlassKey(key);
-        void positionMenuGlass(key, null);
+        void positionMenuGlass(
+          key,
+          null,
+          pushesInstant(resolved),
+          undefined,
+          isGlassFade(resolved),
+        );
       };
     }
     const push = () => {
       const nodes = document.querySelectorAll<HTMLElement>(selector);
       const node = nodes.length > 0 ? nodes[nodes.length - 1] : null;
       if (node) {
-        const rect = node.getBoundingClientRect();
+        const rect = transformActiveRef.current
+          ? layoutRect(node)
+          : node.getBoundingClientRect();
         if (rect.width < 1 || rect.height < 1) {
           return;
         }
         pushRect(
-          node,
+          rect,
           radiusPx,
           key,
           pushesInstant(resolved),
@@ -460,6 +497,7 @@ export function useLiquidGlassSurface(
           local,
           undefined,
           shape,
+          material,
         );
       }
     };
@@ -492,9 +530,20 @@ export function useLiquidGlassSurface(
       unsubscribe();
       window.clearInterval(timer);
       unregisterGlassKey(key);
-      void positionMenuGlass(key, null);
+      // The close push carries the surface's OWN transition style, so an
+      // instant/glass-fade surface also CLOSES instantly — a bare null push
+      // would close with the default wobble reveal.
+      void positionMenuGlass(
+        key,
+        null,
+        pushesInstant(resolved),
+        undefined,
+        isGlassFade(resolved),
+      );
     };
-  }, [active, selector, radiusPx, key, resolved, spring, local, shape]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- materialKey IS
+  // material's dependency (the closure picks the object up on re-run).
+  }, [active, selector, radiusPx, key, resolved, spring, local, shape, materialKey]);
 }
 
 /**
@@ -528,6 +577,7 @@ export function LiquidGlassSurface({
   metaballTension = 2,
   transform,
   transformTiming,
+  material,
   children,
 }: {
   className?: string;
@@ -548,6 +598,13 @@ export function LiquidGlassSurface({
   transform?: GlassTransform;
   /** The transform transition's timing (see [`GlassTransformTiming`]). */
   transformTiming?: GlassTransformTiming;
+  /** The surface's own glass material properties (see
+   *  [`GlassMaterialOverride`]): every set field pins the glass's look to
+   *  this value instead of the app's shared material — tint, outline,
+   *  border, blur, refraction, chroma, vibrancy, rim shadow. Absent
+   *  fields keep the shared material's values; a set override makes the
+   *  surface ignore later material changes for those fields. */
+  material?: GlassMaterialOverride;
   /** Renders this surface as a METABALL container: the drawn shape becomes
    *  the shared metaball field (a liquid blob whose ball inherits THIS
    *  surface's `shape` and silhouette) instead of the shape preset.
@@ -577,6 +634,14 @@ export function LiquidGlassSurface({
   const transformStyle = useGlassTransform(surfaceId, transform, transformTiming);
   const transformActiveRef = useRef(transformStyle != null);
   transformActiveRef.current = transformStyle != null;
+  // The tracking effect's push, exposed for the frame-rate loop below (the
+  // loop lives in its own effect so transform changes never re-run the
+  // tracking effect).
+  const pushNodeRef = useRef<() => void>(() => {});
+  const transformActive = transformStyle != null;
+  // The material override's primitive descriptor: the effect's dependency
+  // (an inline object prop would re-run it every render).
+  const materialKey = material ? JSON.stringify(material) : "";
   // Stable primitive shape descriptors: the effect's dependencies (an
   // inline `{ superellipse: n }` object would re-run it every render).
   const shapeKind: "container" | "pill" | "superellipse" =
@@ -621,6 +686,7 @@ export function LiquidGlassSurface({
     let pendingPush = 0;
     let lastBallKey = "";
     let lastPushedVersion = -1;
+    let lastRectKey = "";
     const pushNode = () => {
       node ??= document.querySelector<HTMLElement>(selector);
       if (!node) {
@@ -629,16 +695,30 @@ export function LiquidGlassSurface({
       // While a transform is active the glass rect must be the wrapper's
       // UNTRANSFORMED layout box: the native glass applies the same
       // transform itself, so following the visual (transformed) rect
-      // would compound the two.
+      // would compound the two. Metaball balls follow the element's
+      // VISUAL silhouette instead.
+      const visualRect = node.getBoundingClientRect();
       const rect = transformActiveRef.current
         ? layoutRect(node)
-        : node.getBoundingClientRect();
+        : visualRect;
       if (rect.width < 1 || rect.height < 1) {
         return;
       }
       if (!metaball) {
+        // The frame-rate tracking loop (below) runs while a transform is
+        // active; a rect dedup keeps stationary frames free of IPC.
+        const rectKey = [
+          rect.left.toFixed(1),
+          rect.top.toFixed(1),
+          rect.width.toFixed(1),
+          rect.height.toFixed(1),
+        ].join(",");
+        if (rectKey === lastRectKey) {
+          return;
+        }
+        lastRectKey = rectKey;
         pushRect(
-          node,
+          rect,
           pushedRadius,
           surfaceId,
           pushesInstant(resolved),
@@ -648,6 +728,7 @@ export function LiquidGlassSurface({
           local,
           undefined,
           shapeSpec,
+          material,
         );
         return;
       }
@@ -655,13 +736,13 @@ export function LiquidGlassSurface({
       // own movement bumps the shared version, so sibling metaball
       // surfaces refresh their (now stale) field copies; each surface
       // dedups against the version it last sent.
-      const minorHalf = Math.min(rect.width, rect.height) / 2;
+      const minorHalf = Math.min(visualRect.width, visualRect.height) / 2;
       const ballRadius = metaballRadiusPx ?? minorHalf;
       const ballKey = [
-        rect.left.toFixed(1),
-        rect.top.toFixed(1),
-        rect.width.toFixed(1),
-        rect.height.toFixed(1),
+        visualRect.left.toFixed(1),
+        visualRect.top.toFixed(1),
+        visualRect.width.toFixed(1),
+        visualRect.height.toFixed(1),
         ballRadius.toFixed(1),
       ].join(",");
       const ownBallMoved = ballKey !== lastBallKey;
@@ -707,7 +788,7 @@ export function LiquidGlassSurface({
         }
       }
       pushRect(
-        node,
+        visualRect,
         pushedRadius,
         surfaceId,
         pushesInstant(resolved),
@@ -717,6 +798,7 @@ export function LiquidGlassSurface({
         local,
         { radius: ballRadius, balls, tension: metaballTension },
         shapeSpec,
+        material,
       );
       // This surface's own ball moved: the siblings' field copies are
       // stale NOW, not at their next tracking tick — schedule their
@@ -740,6 +822,7 @@ export function LiquidGlassSurface({
         pushNode();
       });
     };
+    pushNodeRef.current = pushNode;
     if (metaball) {
       metaballBalls.set(surfaceId, () => {
         const current = node ?? document.querySelector<HTMLElement>(selector);
@@ -792,9 +875,18 @@ export function LiquidGlassSurface({
         metaballVersion += 1;
       }
       unregisterGlassKey(surfaceId);
-      // Unused: delete this menu's own glass instance.
-      void positionMenuGlass(surfaceId, null);
+      // The close push carries the surface's OWN transition style, so an
+      // instant/glass-fade surface also CLOSES instantly (see the hook form).
+      void positionMenuGlass(
+        surfaceId,
+        null,
+        pushesInstant(resolved),
+        group,
+        isGlassFade(resolved),
+      );
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- materialKey IS
+  // material's dependency (the closure picks the object up on re-run).
   }, [
     surfaceId,
     radiusPx,
@@ -806,7 +898,28 @@ export function LiquidGlassSurface({
     metaballTension,
     shapeKind,
     shapeExponent,
+    materialKey,
   ]);
+
+  // Frame-rate tracking while a transform is active: a transform-active
+  // glass is one being animated (a drag, a hold-grow, a settle). Its
+  // wrapper moves through `left`/`top` — position-only changes that fire
+  // neither the ResizeObserver nor the shared DOM lane — so the interval's
+  // 120ms cadence reads as visible steps. While the transform is held,
+  // this loop pushes every changed rect at frame rate; the rect dedup
+  // keeps stationary frames free of IPC.
+  useEffect(() => {
+    if (!transformActive) {
+      return;
+    }
+    let frame = 0;
+    const tick = () => {
+      pushNodeRef.current();
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [transformActive]);
 
   return (
     <div

@@ -98,6 +98,9 @@ pub fn prewarm_menu_glass(
 /// containers merge with each other; `metaball_radius` is this element's own
 /// ball radius (the anchored element may be a tiny dot) and
 /// `metaball_tension` the field's merge exponent (2 = the classic blend).
+///
+/// `material` pins the surface's glass material to per-surface values (the
+/// web UI's `material` prop; see [`crate::GlassMaterialOverride`]).
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn position_menu_glass(
@@ -117,6 +120,7 @@ pub fn position_menu_glass(
     metaball_radius: Option<f64>,
     metaball_balls: Option<Vec<[f64; 6]>>,
     metaball_tension: Option<f64>,
+    material: Option<crate::GlassMaterialOverride>,
 ) -> Result<(), String> {
     let rect = rect.map(|r| [r.x as f32, r.y as f32, r.width as f32, r.height as f32]);
     let radius = rect_radius.unwrap_or(20.0) as f32;
@@ -143,6 +147,7 @@ pub fn position_menu_glass(
         local.unwrap_or(false),
         shape,
         metaball,
+        material,
     )
 }
 

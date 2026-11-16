@@ -332,3 +332,60 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Glass switch (GlassSwitch.tsx): a pill track whose thumb becomes a local
+   liquid glass thumb while held/dragged. Geometry (42x18 track, 24x14
+   capsule thumb, 2 padding) must match the constants in GlassSwitch.tsx. */
+.glass-switch {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  width: 42px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  outline: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.glass-switch:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.glass-switch-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: rgba(120, 120, 128, 0.42);
+  transition: background 220ms cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+.glass-switch[data-on] .glass-switch-track,
+.glass-switch[data-preview="on"] .glass-switch-track {
+  background: #0a84ff;
+}
+
+.glass-switch[data-preview="off"] .glass-switch-track {
+  background: rgba(120, 120, 128, 0.42);
+}
+
+.glass-switch-thumb {
+  position: absolute;
+  top: 2px;
+  width: 24px;
+  height: 14px;
+  border-radius: 999px;
+  background: #ffffff;
+  transition: left 220ms cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+/* The held thumb's wrapper IS the native glass surface: it must stay
+   transparent so the glass material shows instead of the white fill. */
+.glass-switch-thumb-glass {
+  background: transparent;
+}

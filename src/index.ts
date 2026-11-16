@@ -29,6 +29,7 @@ export type { LiquidMenuItem } from "./LiquidMenuItems";
 export { Modal } from "./Modal";
 export { GlassCard } from "./GlassCard";
 export type { GlassShape } from "./GlassCard";
+export { GlassSwitch } from "./GlassSwitch";
 export {
   positionMenuGlass,
   animateMenuGlass,
@@ -41,6 +42,7 @@ export type {
   MenuGlassRect,
   GlassShapeSpec,
   MetaballField,
+  GlassMaterialOverride,
   GlassTransformAnimationSpec,
 } from "./bridge";
 export { parseEasing, easingCss, GLASS_EASING_PRESETS } from "./easing";

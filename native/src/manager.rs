@@ -37,8 +37,17 @@ struct MenuGlass {
     rect: [f32; 4],
     /// The rect the SURFACE window actually covers: the element's rect,
     /// except for metaball surfaces whose canvas extends beyond the tiny
-    /// anchored element (see [`metaball_canvas`]).
+    /// anchored element (see [`metaball_canvas`]) and transform-carrying
+    /// plain surfaces whose canvas is inflated so the scaled silhouette
+    /// never clips (see [`transform_canvas`]).
     canvas: [f32; 4],
+    /// The drawn shape's sub-rect WITHIN the canvas, when the canvas is
+    /// bigger than the element (a held transform's inflation): the shape
+    /// must be the element-sized region inside the inflated canvas, or the
+    /// canvas resize itself would resize the glass. `None` draws the shape
+    /// across the whole canvas (the identity region, every plain surface
+    /// without a transform).
+    shape_rect: Option<[f32; 4]>,
     radius: f32,
     /// Small grouped surfaces tone the shader's height-proportional edge
     /// band and outline down — see [`small_surface_params`].
@@ -77,6 +86,11 @@ struct MenuGlass {
     /// re-stated identical target must not restart a running tween (CSS
     /// transition semantics — no value change, no restart).
     animated_transform: Option<[f32; 4]>,
+    /// The surface's per-surface material override (the web UI's
+    /// `material` prop): applied on top of every re-seed, and the surface
+    /// is material-locked while it is set (the global material watch must
+    /// never clobber a pinned look). `None` follows the shared material.
+    material: Option<GlassMaterialOverride>,
 }
 
 /// One metaball surface's field state, deduplicated against incoming pushes.
@@ -239,17 +253,18 @@ pub fn small_surface_params(
 }
 
 /// Applies a surface's seeded material and pins it against the global
-/// material watch when the surface derives its own scaled variant: small
-/// surfaces scale the rim/border down by size, and a global material push
-/// would flatten that derivation (the app re-applies the material itself,
-/// with [`MenuGlassManager::seed_params`], on every settings change).
+/// material watch when the surface derives its own look (`locked`): small
+/// surfaces scale the rim/border down by size, and overridden surfaces
+/// pin their own material values — a global material push would flatten
+/// either (the app re-applies the material itself, with
+/// [`MenuGlassManager::seed_params`], on every settings change).
 fn seed_surface(
     surface: &mut liquid_glass::GlassSurface,
     params: liquid_glass::GlassShaderParams,
-    small: bool,
+    locked: bool,
 ) {
     let _ = surface.set_shader_params_keeping_corner(params);
-    surface.set_material_locked(small);
+    surface.set_material_locked(locked);
 }
 
 /// See [`MenuGlassManager::pending_group`].
@@ -386,6 +401,102 @@ impl Default for MenuGlassManager {
     }
 }
 
+/// A per-surface glass material override (the web UI's `material` prop):
+/// every set field pins that appearance value onto the surface instead of
+/// the app's shared material — the surface is material-locked, so the
+/// global material watch never clobbers it. `None` fields keep the shared
+/// material's value. The units match the shared material's settings-UI
+/// values (texel-unit fields compensate for capture downscaling exactly
+/// like the material's own do).
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GlassMaterialOverride {
+    pub refraction_strength: Option<f32>,
+    pub blur_radius: Option<f32>,
+    pub blur_samples: Option<f32>,
+    pub tint_strength: Option<f32>,
+    pub glass_tint: Option<[f32; 3]>,
+    pub vibrancy: Option<f32>,
+    pub vibrancy_saturation: Option<f32>,
+    pub edge_band: Option<f32>,
+    pub chromatic_offset: Option<f32>,
+    pub chromatic_blend: Option<f32>,
+    pub outline_strength: Option<f32>,
+    pub outline_thickness: Option<f32>,
+    pub outline_angle: Option<f32>,
+    pub outline_mirror: Option<f32>,
+    pub outline_fade: Option<f32>,
+    pub outline_falloff: Option<f32>,
+    pub border_thickness: Option<f32>,
+    pub border_opacity: Option<f32>,
+    pub rim_shadow: Option<f32>,
+}
+
+impl GlassMaterialOverride {
+    /// Writes every set field onto a seeded params set. Call AFTER the base
+    /// seed (app params + global material + size derivations), so an
+    /// override wins over everything else.
+    fn apply_onto(&self, params: &mut liquid_glass::GlassShaderParams) {
+        if let Some(value) = self.refraction_strength {
+            params.refraction_strength = value;
+        }
+        if let Some(value) = self.blur_radius {
+            params.blur_radius_texels = value;
+        }
+        if let Some(value) = self.blur_samples {
+            params.blur_samples = value;
+        }
+        if let Some(value) = self.tint_strength {
+            params.tint_strength = value;
+        }
+        if let Some(value) = self.glass_tint {
+            params.glass_tint = value;
+        }
+        if let Some(value) = self.vibrancy {
+            params.vibrancy = value;
+        }
+        if let Some(value) = self.vibrancy_saturation {
+            params.vibrancy_saturation = value;
+        }
+        if let Some(value) = self.edge_band {
+            params.edge_band = value;
+        }
+        if let Some(value) = self.chromatic_offset {
+            params.chromatic_offset_texels = value;
+        }
+        if let Some(value) = self.chromatic_blend {
+            params.chromatic_blend = value;
+        }
+        if let Some(value) = self.outline_strength {
+            params.outline_strength = value;
+        }
+        if let Some(value) = self.outline_thickness {
+            params.outline_thickness_px = value;
+        }
+        if let Some(value) = self.outline_angle {
+            params.outline_angle_degrees = value;
+        }
+        if let Some(value) = self.outline_mirror {
+            params.outline_mirror = value;
+        }
+        if let Some(value) = self.outline_fade {
+            params.outline_fade_px = value;
+        }
+        if let Some(value) = self.outline_falloff {
+            params.outline_falloff = value;
+        }
+        if let Some(value) = self.border_thickness {
+            params.border_thickness_px = value;
+        }
+        if let Some(value) = self.border_opacity {
+            params.border_opacity = value;
+        }
+        if let Some(value) = self.rim_shadow {
+            params.rim_shadow_strength = value;
+        }
+    }
+}
+
 /// One metaball element's push payload (see
 /// [`MenuGlassManager::position_menu_glass`]).
 ///
@@ -447,6 +558,22 @@ impl Default for GlassTransformAnimation {
     }
 }
 
+/// The drawn-shape rect a transform spec lands on: the element rect scaled
+/// about its CENTER and translated (the CSS transform model), in
+/// window-absolute physical pixels.
+fn transform_target_rect(rect: [f32; 4], spec: &GlassTransformAnimation) -> [f32; 4] {
+    let scale_x = (spec.scale[0] as f32).max(1e-4);
+    let scale_y = (spec.scale[1] as f32).max(1e-4);
+    let width = rect[2] * scale_x;
+    let height = rect[3] * scale_y;
+    [
+        rect[0] + (rect[2] - width) / 2.0 + spec.translate[0] as f32,
+        rect[1] + (rect[3] - height) / 2.0 + spec.translate[1] as f32,
+        width,
+        height,
+    ]
+}
+
 /// Converts a [`GlassTransformAnimation`] into the engine's shape
 /// transform for a surface whose shape region spans `canvas` (x, y, w, h,
 /// physical pixels; the identity region the menu surfaces use).
@@ -472,11 +599,33 @@ fn css_transform_to_engine(
     let height = canvas[3].max(1.0);
     let scale_x = scale[0] as f32;
     // CSS scale(0) would collapse the shape onto its anchor; the shader's
-    // own `max(…, 1e-4)` guard matches.
+    // own `max(., 1e-4)` guard matches.
     let scale_y = (scale[1] as f32).max(1e-4);
     let offset_x = (translate[0] as f32) / height;
     let offset_y = (translate[1] as f32) / height - 0.5 + 0.5 * scale_y;
     [scale_x, scale_y, offset_x, offset_y]
+}
+
+/// Inflates `rect` to cover both its rest state and its transformed state:
+/// the shape transform scales/shifts the silhouette BEYOND the element rect
+/// (center-anchored, translate applied unscaled), and the surface canvas
+/// must hold the whole extent or the scaled glass clips flat at the canvas
+/// edges. The union with the rest rect also bounds the tween's whole path
+/// (it glides from the rest state into the target).
+fn transform_canvas(rect: [f32; 4], spec: &GlassTransformAnimation) -> [f32; 4] {
+    union_rect(transform_target_rect(rect, spec), rect)
+}
+
+/// The bounding union of two `[x, y, w, h]` rects.
+fn union_rect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let x = a[0].min(b[0]);
+    let y = a[1].min(b[1]);
+    [
+        x,
+        y,
+        (a[0] + a[2]).max(b[0] + b[2]) - x,
+        (a[1] + a[3]).max(b[1] + b[3]) - y,
+    ]
 }
 
 impl MenuGlassManager {
@@ -553,9 +702,28 @@ impl MenuGlassManager {
         entry.0
     }
 
+    /// The shared-settings sweep's params for one surface: the manager's
+    /// base with the surface's fade style, its small-size derivation and
+    /// its own material override (if any) layered on.
+    fn sweep_params(
+        base: liquid_glass::GlassShaderParams,
+        glass: &MenuGlass,
+    ) -> liquid_glass::GlassShaderParams {
+        let mut scaled = if glass.small {
+            small_surface_params(base, glass.rect[3])
+        } else {
+            base
+        };
+        scaled.glass_fade = if glass.fade { 1.0 } else { 0.0 };
+        if let Some(material) = glass.material {
+            material.apply_onto(&mut scaled);
+        }
+        scaled
+    }
+
     /// Replaces the seed shader params; every surface created afterwards
     /// (menus, pooled) seeds from these. Existing surfaces are re-seeded
-    /// (each keeps its own fade/small derivation).
+    /// (each keeps its own fade/small derivation and material override).
     pub fn set_params(&self, params: liquid_glass::GlassShaderParams) {
         *self.params.lock().expect("params lock poisoned") = params;
         for glass in self
@@ -566,15 +734,14 @@ impl MenuGlassManager {
         {
             // Keep each surface's fade style; the shared settings must not
             // clobber the glass_fade flag stamped at creation.
-            let mut scaled = if glass.small {
-                small_surface_params(params, glass.rect[3])
-            } else {
-                params
-            };
-            scaled.glass_fade = if glass.fade { 1.0 } else { 0.0 };
             // A failure on ONE surface must never abort the sweep and leave
             // the rest stale (mismatched glass).
-            seed_surface(&mut glass.surface, scaled, glass.small);
+            let seeded = Self::sweep_params(params, glass);
+            seed_surface(
+                &mut glass.surface,
+                seeded,
+                glass.small || glass.material.is_some(),
+            );
         }
         for glass in self
             .recycled
@@ -582,37 +749,40 @@ impl MenuGlassManager {
             .expect("recycled glasses lock poisoned")
             .iter_mut()
         {
-            let mut scaled = if glass.small {
-                small_surface_params(params, glass.rect[3])
-            } else {
-                params
-            };
-            scaled.glass_fade = if glass.fade { 1.0 } else { 0.0 };
-            seed_surface(&mut glass.surface, scaled, glass.small);
+            let seeded = Self::sweep_params(params, glass);
+            seed_surface(
+                &mut glass.surface,
+                seeded,
+                glass.small || glass.material.is_some(),
+            );
         }
     }
 
     /// Seeds a surface's material from the manager's params with the
-    /// surface's fade style stamped in. Must run BEFORE `set_reveal`, which
-    /// stamps its own turbulence/wobble onto the params. The global material
-    /// file is merged in first: another glass app may have restyled the
-    /// shared material since our last apply, and a freshly spawned surface
-    /// must never come up stale.
+    /// surface's fade style stamped in, plus the surface's own material
+    /// override (the web UI's `material` prop) layered on last. Must run
+    /// BEFORE `set_reveal`, which stamps its own turbulence/wobble onto the
+    /// params. The global material file is merged in first: another glass
+    /// app may have restyled the shared material since our last apply, and
+    /// a freshly spawned surface must never come up stale.
     fn seed_params(
         &self,
         small: bool,
         height_px: f32,
         fade: bool,
+        material: Option<GlassMaterialOverride>,
     ) -> liquid_glass::GlassShaderParams {
         let mut params = *self.params.lock().expect("params lock poisoned");
-        let material = liquid_glass::broker::read_material();
-        material.apply_onto(&mut params, 1.0);
+        let material_file = liquid_glass::broker::read_material();
+        material_file.apply_onto(&mut params, 1.0);
         params.glass_fade = if fade { 1.0 } else { 0.0 };
         if small {
-            small_surface_params(params, height_px)
-        } else {
-            params
+            params = small_surface_params(params, height_px);
         }
+        if let Some(material) = material {
+            material.apply_onto(&mut params);
+        }
+        params
     }
 
     /// Pre-creates collapsed menu glass surfaces directly into the recycle
@@ -653,6 +823,7 @@ impl MenuGlassManager {
                         host: overlay.0 as isize,
                         rect: [0.0, 0.0, 1.0, 1.0],
                         canvas: [0.0, 0.0, 1.0, 1.0],
+                        shape_rect: None,
                         radius: 20.0,
                         small: false,
                         fade: false,
@@ -661,6 +832,7 @@ impl MenuGlassManager {
                         metaball: None,
                         metaball_generation: 0,
                         animated_transform: None,
+                        material: None,
                     });
                 }
                 Err(error) => {
@@ -853,6 +1025,12 @@ impl MenuGlassManager {
     /// `shape` selects the surface's own preset beyond the rounded rect:
     /// `Some(GlassShape::Superellipse)` draws the squircle (its exponent
     /// carries over as the metaball ball's shape when merging).
+    ///
+    /// `material` pins the surface's glass material to per-surface values
+    /// (the web UI's `material` prop): every set field overrides the
+    /// seeded look, and the surface is material-locked so the global
+    /// material watch never clobbers it. Changing the override on a live
+    /// surface re-seeds it.
     #[allow(clippy::too_many_arguments)]
     pub fn position_menu_glass(
         &self,
@@ -867,6 +1045,7 @@ impl MenuGlassManager {
         local: bool,
         shape: Option<GlassShape>,
         metaball: Option<MetaballPush>,
+        material: Option<GlassMaterialOverride>,
     ) -> Result<(), String> {
         let metaball = metaball.map(|push| MetaballFieldState {
             ball_radius: push.ball_radius,
@@ -927,6 +1106,19 @@ impl MenuGlassManager {
             _ => false,
         };
         let mut glasses = self.glasses.lock().expect("menu glasses lock poisoned");
+        // This key's held transform spec, if any: plain surfaces anchor a
+        // canvas inflated to contain the spec's transformed extent, so the
+        // scaled glass never clips at the canvas edges.
+        let held_transform = self
+            .transforms
+            .lock()
+            .expect("transforms lock poisoned")
+            .get(key)
+            .cloned();
+        let plain_surface_rect = |rect: [f32; 4]| match &held_transform {
+            Some(spec) => union_rect(transform_canvas(rect, spec), rect),
+            None => rect,
+        };
         if group_coherent {
             if let Some(generation) = metaball_generation {
                 release_and_present_metaball_group(&mut glasses, overlay, generation);
@@ -990,15 +1182,24 @@ impl MenuGlassManager {
                 if let Some(glass) = glasses.get_mut(key) {
                     // Metaball surfaces anchor a canvas grown beyond the
                     // element (the blob renders around the tiny element);
-                    // plain surfaces anchor the element rect itself.
-                    let surface_rect = metaball
-                        .as_ref()
-                        .map_or(rect, |metaball| metaball_canvas(rect, metaball_reach(metaball)));
+                    // plain surfaces anchor the element rect, inflated to
+                    // hold a held transform's scaled extent.
+                    let surface_rect = match metaball.as_ref() {
+                        Some(metaball) => metaball_canvas(rect, metaball_reach(metaball)),
+                        None => plain_surface_rect(rect),
+                    };
+                    // Metaball canvases are truncated onto the integer grid,
+                    // so sub-pixel element drift can flip the truncation back
+                    // and forth by 1px — a tight tolerance would re-anchor
+                    // (and re-convert the field) on every flip. Plain
+                    // canvases are continuous: a loose tolerance would
+                    // quantize a drag into visible 2px steps.
+                    let moved_tolerance = if metaball.is_some() { 2.0 } else { 0.5 };
                     let moved = !glass
                         .canvas
                         .iter()
                         .zip(surface_rect.iter())
-                        .all(|(a, b)| (a - b).abs() < 2.0);
+                        .all(|(a, b)| (a - b).abs() < moved_tolerance);
                     if moved {
                         // KEEP the surface's z slot: this re-anchor happens
                         // per frame while a metaball is dragged, and the
@@ -1097,13 +1298,23 @@ impl MenuGlassManager {
                         glass.surface.set_shape(shape.unwrap_or_default())?;
                         glass.shape = shape;
                     }
-                    // A surface switching between fade styles gets its
-                    // material re-seeded (glass_fade lives in the shader
-                    // params).
-                    if glass.fade != glass_fade {
+                    // A surface switching between fade styles — or getting a
+                    // new material override — gets its material re-seeded
+                    // (glass_fade lives in the shader params).
+                    if glass.fade != glass_fade || glass.material != material {
                         glass.fade = glass_fade;
-                        let params = self.seed_params(glass.small, rect[3], glass_fade);
-                        seed_surface(&mut glass.surface, params, glass.small);
+                        glass.material = material;
+                        let params = self.seed_params(
+                            glass.small,
+                            rect[3],
+                            glass_fade,
+                            glass.material,
+                        );
+                        seed_surface(
+                            &mut glass.surface,
+                            params,
+                            glass.small || glass.material.is_some(),
+                        );
                     }
                     // While the surface waits for its reveal group it stays
                     // hidden; the group reveal shows it with its siblings.
@@ -1114,11 +1325,19 @@ impl MenuGlassManager {
                     glass.host = overlay.0 as isize;
                     return Ok(());
                 }
+                // The canvas this push's surface must cover: the element
+                // rect (plain) or the metaball canvas. Computed once here
+                // �?" the pool lookup and the reuse path's shape re-fit both
+                // express against it.
+                let surface_rect = match metaball.as_ref() {
+                    Some(metaball) => metaball_canvas(rect, metaball_reach(metaball)),
+                    None => plain_surface_rect(rect),
+                };
                 // Prefer a warm, collapsed surface from the recycle pool: it
                 // re-anchors instantly, while a fresh capture session needs
                 // hundreds of milliseconds before its first frame arrives.
                 // Only surfaces of the SAME feed kind AND the SAME host
-                // window are reusable — a global surface must never be
+                // window are reusable �?" a global surface must never be
                 // re-anchored into the local pipeline or vice versa, and a
                 // surface's DComp target is bound to the window it was
                 // created for.
@@ -1128,9 +1347,6 @@ impl MenuGlassManager {
                         .lock()
                         .expect("recycled glasses lock poisoned");
                     let overlay_host = overlay.0 as isize;
-                    let surface_rect = metaball
-                        .as_ref()
-                        .map_or(rect, |metaball| metaball_canvas(rect, metaball_reach(metaball)));
                     let match_index = recycled.iter().rposition(|pooled| {
                         pooled.local == local
                             && pooled.host == overlay_host
@@ -1138,23 +1354,45 @@ impl MenuGlassManager {
                     });
                     let pooled = match_index.map(|index| recycled.remove(index));
                     drop(recycled);
+                    // A pooled surface is only reusable if it re-anchors to
+                    // the requested rect: a failed re-anchor must NOT resume
+                    // rendering at its PARKED geometry (glass would spawn at
+                    // whichever element owned the surface's previous life).
+                    // Drop it (the Drop tears the surface down) and fall
+                    // through to a fresh creation at the right position.
+                    let pooled = match pooled {
+                        Some(mut recycled) => {
+                            match recycled.surface.set_anchor(SurfaceAnchor::Rect {
+                                offset_x: surface_rect[0],
+                                offset_y: surface_rect[1],
+                                width: surface_rect[2],
+                                height: surface_rect[3],
+                            }) {
+                                Ok(()) => Some(recycled),
+                                Err(error) => {
+                                    eprintln!(
+                                        "glass-ui menu glass re-anchor failed: {error}"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        None => None,
+                    };
                     match pooled {
                         Some(mut recycled) => {
-                            recycled
-                                .surface
-                                .set_anchor(SurfaceAnchor::Rect {
-                                    offset_x: surface_rect[0],
-                                    offset_y: surface_rect[1],
-                                    width: surface_rect[2],
-                                    height: surface_rect[3],
-                                })
-                                .map_err(|error| {
-                                    eprintln!("glass-ui menu glass re-anchor failed: {error}");
-                                    error
-                                })
-                                .ok();
                             // Back from the pool: resume rendering.
                             recycled.surface.set_paused(false);
+                            // A pooled surface carries its previous life's
+                            // shape transform (a held CSS transform or a
+                            // spring mid-flight); a new life starts at the
+                            // identity — the surface is fully collapsed
+                            // (invisible), so the reset cannot pop visually.
+                            // A spec this key holds re-applies below.
+                            let _ = recycled
+                                .surface
+                                .set_shape_transform([1.0, 1.0, 0.0, 0.0]);
+                            recycled.animated_transform = None;
                             recycled
                         }
                         None => {
@@ -1195,20 +1433,44 @@ impl MenuGlassManager {
                             }
                             let small = group.is_some();
                             // Seed the fresh surface with the saved glass
-                            // settings (plus this surface's fade style) BEFORE
-                            // the reveal is configured — set_reveal stamps its
-                            // own turbulence/wobble onto the params, and seeding
+                            // settings (plus this surface's fade style and
+                            // material override) BEFORE the reveal is
+                            // configured — set_reveal stamps its own
+                            // turbulence/wobble onto the params, and seeding
                             // afterwards would visibly snap the material as the
                             // user's values land.
                             seed_surface(
                                 &mut surface,
-                                self.seed_params(small, rect[3], glass_fade),
-                                small,
+                                self.seed_params(small, rect[3], glass_fade, material),
+                                small || material.is_some(),
                             );
                             // A blurred backdrop does not need full refresh
                             // rate: cap menu surfaces for content-driven frames
                             // (reveal animations run at tick rate).
                             surface.set_frame_cap(Some(60.0));
+                            // A transform-inflated canvas draws its shape as
+                            // the element-sized sub-rect within it (before the
+                            // reveal, so the first visible frame is the
+                            // element-sized glass, not the whole canvas).
+                            let shape_rect = held_transform.as_ref().map(|_| {
+                                [
+                                    rect[0] - surface_rect[0],
+                                    rect[1] - surface_rect[1],
+                                    rect[2],
+                                    rect[3],
+                                ]
+                            });
+                            match shape_rect {
+                                Some(shape_rect) => {
+                                    surface.set_shape_rect_px(shape_rect, radius)?;
+                                }
+                                None => {
+                                    surface.set_shape_rect_px(
+                                        [0.0, 0.0, surface_rect[2], surface_rect[3]],
+                                        radius,
+                                    )?;
+                                }
+                            }
                             // Start the reveal immediately with the chosen
                             // animation; the shader defaults would otherwise
                             // play the first frames from the wrong corner with
@@ -1220,6 +1482,7 @@ impl MenuGlassManager {
                                 host: overlay.0 as isize,
                                 rect,
                                 canvas: surface_rect,
+                                shape_rect,
                                 radius,
                                 small,
                                 fade: glass_fade,
@@ -1228,6 +1491,7 @@ impl MenuGlassManager {
                                 metaball: metaball.clone(),
                                 metaball_generation: metaball_generation.unwrap_or(0),
                                 animated_transform: None,
+                                material,
                             }
                         }
                     }
@@ -1239,17 +1503,48 @@ impl MenuGlassManager {
                 // carry another life's kind).
                 glass.surface.set_shape(shape.unwrap_or_default())?;
                 glass.shape = shape;
+                // ...and its drawn-shape sub-rect: a pooled surface may
+                // carry a previous life's shape rect (or none); this life's
+                // is the element within THIS life's canvas (the pool surface
+                // was just re-anchored to `surface_rect` — the stale
+                // `glass.canvas` still holds the previous life's geometry,
+                // and a shape rect expressed against it lands at the wrong
+                // offset/size: a pre-warmed surface's 1x1 park canvas would
+                // draw the glass as a 1px dot until the next re-fit).
+                glass.shape_rect = held_transform.as_ref().map(|_| {
+                    [
+                        rect[0] - surface_rect[0],
+                        rect[1] - surface_rect[1],
+                        rect[2],
+                        rect[3],
+                    ]
+                });
+                match glass.shape_rect {
+                    Some(shape_rect) => {
+                        glass.surface.set_shape_rect_px(shape_rect, radius)?;
+                    }
+                    None => {
+                        glass.surface.set_shape_rect_px(
+                            [0.0, 0.0, surface_rect[2], surface_rect[3]],
+                            radius,
+                        )?;
+                    }
+                }
                 // A pooled surface may be re-used by a different panel size
-                // class or fade style than its previous life; re-seed its
-                // material when either changed.
+                // class, fade style or material override than its previous
+                // life; re-seed its material when any of them changed.
                 let small = group.is_some();
-                if glass.small != small || glass.fade != glass_fade {
+                if glass.small != small
+                    || glass.fade != glass_fade
+                    || glass.material != material
+                {
                     glass.small = small;
                     glass.fade = glass_fade;
+                    glass.material = material;
                     seed_surface(
                         &mut glass.surface,
-                        self.seed_params(small, rect[3], glass_fade),
-                        small,
+                        self.seed_params(small, rect[3], glass_fade, material),
+                        small || material.is_some(),
                     );
                 }
                 // Grouped surfaces hold their reveal until every member has
@@ -1266,9 +1561,6 @@ impl MenuGlassManager {
                 // Apply (or refresh) the metaball field against THIS canvas:
                 // a pooled surface carries a stale canvas origin, and even a
                 // fresh one records its state here for the dedup below.
-                let surface_rect = metaball
-                    .as_ref()
-                    .map_or(rect, |metaball| metaball_canvas(rect, metaball_reach(metaball)));
                 if let Some(metaball) = &metaball {
                     if glass.metaball.as_ref() != Some(metaball) || glass.canvas != surface_rect {
                         glass.surface.set_metaballs_field_px(
@@ -1357,12 +1649,73 @@ impl MenuGlassManager {
         // surface); the parameter stays for API symmetry with the other
         // manager operations and future host-scoping needs.
         let _ = overlay;
-        self.transforms
-            .lock()
-            .expect("transforms lock poisoned")
-            .insert(key.to_owned(), animation.clone());
+        let previous = {
+            let mut transforms = self
+                .transforms
+                .lock()
+                .expect("transforms lock poisoned");
+            let previous = transforms.get(key).cloned();
+            transforms.insert(key.to_owned(), animation.clone());
+            previous
+        };
         let mut glasses = self.glasses.lock().expect("menu glasses lock poisoned");
         if let Some(glass) = glasses.get_mut(key) {
+            // The canvas BEFORE the re-fit: the shape re-expression below
+            // shifts the drawn shape by the origin delta between the two
+            // canvases.
+            let previous_canvas = glass.canvas;
+            // Re-fit the canvas FIRST: the tween's whole path (the previous
+            // target, the new one, and the rest state) must fit inside it,
+            // or the scaled glass clips flat at the canvas edges.
+            let mut canvas = union_rect(transform_canvas(glass.rect, &animation), glass.rect);
+            if let Some(previous) = &previous {
+                canvas = union_rect(canvas, transform_canvas(glass.rect, previous));
+            }
+            if glass
+                .canvas
+                .iter()
+                .zip(canvas.iter())
+                .any(|(a, b)| (a - b).abs() >= 0.5)
+            {
+                // The canvas re-anchors under the drawn shape. When the
+                // ORIGIN moved, the drawn shape's canvas-relative rect must
+                // be re-expressed by the origin delta to stay at the same
+                // window position (a snap to the element rect would drop any
+                // live transform — visible as a jump at release, when the
+                // canvas shrinks to the settle extent). When only the size
+                // grew, the stored rect is already valid: skipping the snap
+                // keeps a running tween alive, so a transform retargeting
+                // mid-flight glides instead of popping.
+                let origin_delta = [
+                    previous_canvas[0] - canvas[0],
+                    previous_canvas[1] - canvas[1],
+                ];
+                glass
+                    .surface
+                    .set_anchor_keep_z(SurfaceAnchor::Rect {
+                        offset_x: canvas[0],
+                        offset_y: canvas[1],
+                        width: canvas[2],
+                        height: canvas[3],
+                    })?;
+                glass.canvas = canvas;
+                if origin_delta.iter().any(|d| d.abs() >= 0.5) {
+                    let stored = glass.shape_rect.unwrap_or([
+                        0.0,
+                        0.0,
+                        previous_canvas[2],
+                        previous_canvas[3],
+                    ]);
+                    let shape_rect = [
+                        stored[0] + origin_delta[0],
+                        stored[1] + origin_delta[1],
+                        stored[2],
+                        stored[3],
+                    ];
+                    glass.surface.set_shape_rect_px(shape_rect, glass.radius)?;
+                    glass.shape_rect = Some(shape_rect);
+                }
+            }
             Self::apply_transform_spec(glass, &animation, true);
         }
         Ok(())
@@ -1375,11 +1728,23 @@ impl MenuGlassManager {
     /// target so re-stated specs never restart a settled (or running)
     /// animation.
     fn apply_transform_spec(glass: &mut MenuGlass, spec: &GlassTransformAnimation, animated: bool) {
-        let target = css_transform_to_engine(glass.canvas, spec.scale, spec.translate);
-        if glass.animated_transform == Some(target) {
+        // The spec lands as a DRAWN-SHAPE RECT: the element rect scaled
+        // about its center and translated. Tweening the rect itself (the
+        // engine's shape-rect glide — constant-buffer updates at the render
+        // loop's rate, no window operations mid-flight) keeps the corners'
+        // radius ratio constant at every size, and the canvas's job is only
+        // to be big enough (the caller inflates it before this runs).
+        let target_abs = transform_target_rect(glass.rect, spec);
+        let target_rel = [
+            target_abs[0] - glass.canvas[0],
+            target_abs[1] - glass.canvas[1],
+            target_abs[2],
+            target_abs[3],
+        ];
+        if glass.animated_transform == Some(target_rel) {
             return;
         }
-        glass.animated_transform = Some(target);
+        glass.animated_transform = Some(target_rel);
         let duration_secs = (spec.duration_ms.max(1.0) / 1000.0) as f32;
         let delay_secs = (spec.delay_ms.max(0.0) / 1000.0) as f32;
         let easing = [
@@ -1388,16 +1753,26 @@ impl MenuGlassManager {
             spec.easing[2] as f32,
             spec.easing[3] as f32,
         ];
+        // The corner radius rides the scale: a capsule stays a capsule only
+        // when its radius grows with the shape (the shader normalizes the
+        // radius against the drawn rect's height).
+        let scaled_radius = (glass.radius * target_abs[3] / glass.rect[3].max(1.0)).max(0.0);
         let result = if animated {
-            glass
-                .surface
-                .set_shape_transform_eased(target, duration_secs, easing, delay_secs)
+            glass.surface.set_shape_rect_px_eased(
+                target_rel,
+                scaled_radius,
+                duration_secs,
+                easing,
+                delay_secs,
+            )
         } else {
-            glass.surface.set_shape_transform(target)
+            glass.surface.set_shape_rect_px(target_rel, scaled_radius)
         };
         if let Err(error) = result {
             eprintln!("glass-ui menu glass transform failed: {error}");
+            return;
         }
+        glass.shape_rect = Some(target_rel);
     }
 
     /// Starts the menu's squash-and-stretch scale spring from `from_w` to
@@ -1619,7 +1994,10 @@ impl MenuGlassManager {
         for key in stale {
             // The close path: collapse to the end, then park for reuse.
             let closed = {
-                let mut glasses = self.glasses.lock().expect("menu glasses lock poisoned");
+                let mut glasses =
+                    self.glasses
+                        .lock()
+                        .expect("menu glasses lock poisoned");
                 glasses.remove(&key)
             };
             if let Some(mut glass) = closed {

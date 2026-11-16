@@ -49,6 +49,35 @@ export interface MetaballField {
   tension: number;
 }
 
+/** A per-surface glass material override: every set field pins that
+ *  appearance value onto the surface instead of the app's shared material
+ *  (the surface is material-locked, so the global material watch never
+ *  clobbers it). Absent fields keep the shared material's value. The
+ *  units match the shared material's — texel-unit fields compensate for
+ *  capture downscaling on the native side exactly like the settings UI's
+ *  values do. */
+export interface GlassMaterialOverride {
+  refractionStrength?: number;
+  blurRadius?: number;
+  blurSamples?: number;
+  tintStrength?: number;
+  tintColor?: [number, number, number];
+  vibrancy?: number;
+  vibrancySaturation?: number;
+  edgeBand?: number;
+  chromaticOffset?: number;
+  chromaticBlend?: number;
+  outlineStrength?: number;
+  outlineThickness?: number;
+  outlineAngle?: number;
+  outlineMirror?: number;
+  outlineFade?: number;
+  outlineFalloff?: number;
+  borderThickness?: number;
+  borderOpacity?: number;
+  rimShadow?: number;
+}
+
 /**
  * Renders (or removes, with `rect = null`) the native liquid glass surface
  * behind a menu, keyed by `key`. The rect is in physical pixels relative to
@@ -57,7 +86,8 @@ export interface MetaballField {
  * only ever sits over the app's own content (an in-app card, control or
  * panel) needs no screen duplication at all. `shape` selects the surface's
  * own preset beyond the rounded rect. `metaball` renders the surface as a
- * metaball container instead of the shape preset.
+ * metaball container instead of the shape preset. `material` pins the
+ * surface's glass material to custom values (see [`GlassMaterialOverride`]).
  */
 export async function positionMenuGlass(
   key: string,
@@ -69,6 +99,7 @@ export async function positionMenuGlass(
   local?: boolean,
   metaball?: MetaballField,
   shape?: GlassShapeSpec,
+  material?: GlassMaterialOverride,
 ): Promise<void> {
   try {
     await invoke("position_menu_glass", {
@@ -89,6 +120,7 @@ export async function positionMenuGlass(
       metaballRadius: metaball?.radius ?? null,
       metaballBalls: metaball?.balls ?? null,
       metaballTension: metaball?.tension ?? null,
+      material: material ?? null,
     });
   } catch {
     // The browser preview does not expose native glass.
@@ -106,12 +138,18 @@ export async function logUi(message: string): Promise<void> {
 
 /**
  * Pre-creates warm liquid glass surfaces in the native recycle pool, so the
- * next grouped panel opens instantly. Call while the user is hovering the
- * trigger, buying the capture-session warmup time before the click.
+ * next panel opens instantly. Call while the user is hovering the trigger,
+ * buying the capture-session warmup time before the click. `local` pre-warms
+ * in-app (local-feed) surfaces instead of the global ones — a pool entry is
+ * only reused by pushes of the SAME feed kind, so pre-warm the kind the
+ * surfaces will actually use.
  */
-export async function prewarmMenuGlass(count: number): Promise<void> {
+export async function prewarmMenuGlass(
+  count: number,
+  local?: boolean,
+): Promise<void> {
   try {
-    await invoke("prewarm_menu_glass", { count });
+    await invoke("prewarm_menu_glass", { count, local: local ?? false });
   } catch {
     // The browser preview does not expose native glass.
   }
