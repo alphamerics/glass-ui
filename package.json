@@ -1,6 +1,7 @@
 {
   "name": "glass-ui",
   "version": "0.1.0",
+  "author": "Moonshift",
   "description": "Reusable liquid glass web UI kit: React components that drive native GPU glass surfaces behind the DOM, the Tauri invoke bridge they need, and the shared glass design system (SF Pro Display, menu/modal/glass styles).",
   "type": "module",
   "main": "src/index.ts",

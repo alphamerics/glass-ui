@@ -1,6 +1,7 @@
 [package]
 name = "glass-ui"
 version = "0.1.0"
+authors = ["Moonshift"]
 edition = "2021"
 description = "Reusable native menu-glass manager for liquid-glass Tauri apps: per-key glass surfaces, recycle pool, group reveals, springs and hit rects"
 license = "MIT"
