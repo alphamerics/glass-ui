@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import {
   animateMenuGlass,
+  getClientOffset,
   positionMenuGlass,
   syncMenuGlasses,
   type GlassMaterialOverride,
@@ -384,11 +385,15 @@ function pushRect(
   material?: GlassMaterialOverride,
 ): void {
   const scale = window.devicePixelRatio || 1;
+  const chrome = getClientOffset();
   void positionMenuGlass(
     key,
     {
-      x: rect.left * scale,
-      y: rect.top * scale,
+      // The client area sits inset within a framed host window (title bar,
+      // borders); the native anchors are window-relative, so the offset
+      // rides along (0/0 on borderless hosts).
+      x: rect.left * scale + chrome.x,
+      y: rect.top * scale + chrome.y,
       width: rect.width * scale,
       height: rect.height * scale,
       // The rect speaks physical pixels and the native side normalizes the

@@ -430,6 +430,7 @@ pub struct GlassMaterialOverride {
     pub border_thickness: Option<f32>,
     pub border_opacity: Option<f32>,
     pub rim_shadow: Option<f32>,
+    pub lens_strength: Option<f32>,
 }
 
 impl GlassMaterialOverride {
@@ -493,6 +494,9 @@ impl GlassMaterialOverride {
         }
         if let Some(value) = self.rim_shadow {
             params.rim_shadow_strength = value;
+        }
+        if let Some(value) = self.lens_strength {
+            params.lens_strength = value;
         }
     }
 }
@@ -2047,6 +2051,26 @@ impl MenuGlassManager {
         targets
     }
 
+    /// Every surface's handle and compositor for ONE host only. Multi-window
+    /// apps scope a host's z-order/slide operations to that host — another
+    /// host's glass must neither restack with it (the taskbar parking itself
+    /// beneath the foreground window would otherwise bury the settings
+    /// window's thumbs below that very window) nor ride its slide.
+    pub fn surface_targets_for_host(&self, host: isize) -> Vec<(isize, SharedCompositor)> {
+        let mut targets: Vec<(isize, SharedCompositor)> = Vec::new();
+        if let Ok(glasses) = self.glasses.lock() {
+            for glass in glasses.values().filter(|glass| glass.host == host) {
+                targets.push((glass.surface.hwnd_addr(), glass.surface.compositor()));
+            }
+        }
+        if let Ok(recycled) = self.recycled.lock() {
+            for glass in recycled.iter().filter(|glass| glass.host == host) {
+                targets.push((glass.surface.hwnd_addr(), glass.surface.compositor()));
+            }
+        }
+        targets
+    }
+
     /// Shifts every menu surface vertically (the host app's auto-hide slide
     /// or window move). All anchors are overlay-relative, so translating the
     /// overlay and every surface by the same amount keeps the geometry
@@ -2084,6 +2108,32 @@ impl MenuGlassManager {
         if let Ok(mut recycled) = self.recycled.lock() {
             for glass in recycled.iter_mut() {
                 let _ = glass.surface.sync_bounds(overlay.0 as isize);
+            }
+        }
+    }
+
+    /// Host-scoped bounds re-sync: re-anchors and re-pins only THIS host's
+    /// glasses. The generic [`Self::sync_bounds`] re-anchors everything
+    /// against ONE host, which is only correct for single-window apps — a
+    /// multi-window app's second host must re-sync through this instead, or
+    /// its event pass would drag every other host's panels onto itself.
+    pub fn sync_host_bounds(&self, host: isize) {
+        if let Ok(mut glasses) = self.glasses.lock() {
+            let mut ordered: Vec<&mut MenuGlass> = glasses
+                .values_mut()
+                .filter(|glass| glass.host == host)
+                .collect();
+            ordered.sort_by_key(|glass| match glass.metaball {
+                Some(_) => 0,
+                None => 1,
+            });
+            for glass in ordered {
+                let _ = glass.surface.sync_bounds(host);
+            }
+        }
+        if let Ok(mut recycled) = self.recycled.lock() {
+            for glass in recycled.iter_mut().filter(|glass| glass.host == host) {
+                let _ = glass.surface.sync_bounds(host);
             }
         }
     }

@@ -5,6 +5,7 @@
  * Tauri webview (the browser preview), so the components work anywhere.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { parseEasing, type GlassEasing } from "./easing";
 
 /** A menu glass rect, in physical pixels relative to the overlay's top-left. */
@@ -15,6 +16,41 @@ export interface MenuGlassRect {
   height: number;
   radius?: number;
 }
+
+/* ---- The client-area offset ----
+   The DOM's rects are CLIENT-relative, but the native anchors speak
+   WINDOW-relative pixels (GetWindowRect-based). Borderless hosts have no
+   inset (0/0), but a FRAMED window's webview sits below its title bar and
+   inside its borders — the offset must be added to every pushed rect or
+   the glass lands displaced by the window chrome. Fetched once per window
+   and refreshed on resize (scale-factor changes resize the chrome); moves
+   cannot change it. */
+const clientOffset = { x: 0, y: 0 };
+
+/** The client area's current offset within its host window (physical px).
+    Live-read by the rect pusher. */
+export function getClientOffset(): { x: number; y: number } {
+  return clientOffset;
+}
+
+async function refreshClientOffset(): Promise<void> {
+  try {
+    const win = getCurrentWindow();
+    const [inner, outer] = await Promise.all([
+      win.innerPosition(),
+      win.outerPosition(),
+    ]);
+    clientOffset.x = inner.x - outer.x;
+    clientOffset.y = inner.y - outer.y;
+  } catch {
+    // The browser preview does not expose the native window — keep 0.
+  }
+}
+
+void refreshClientOffset();
+window.addEventListener("resize", () => {
+  void refreshClientOffset();
+});
 
 /** Replaces the app's interactive-element rects (overlay-relative physical
  * pixels) for native hit testing. Only meaningful for shell overlays whose
@@ -76,6 +112,12 @@ export interface GlassMaterialOverride {
   borderThickness?: number;
   borderOpacity?: number;
   rimShadow?: number;
+  /** Interior lens refraction: the middle samples radially outward from
+   *  the shape's center, so the backdrop underneath reads zoomed out /
+   *  smaller. Fractional field expansion (0.4 = the interior samples a
+   *  40% wider backdrop field), eased out across the edge band (0
+   *  disables it). */
+  lensStrength?: number;
 }
 
 /**

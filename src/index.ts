@@ -29,6 +29,10 @@ export type { LiquidMenuItem } from "./LiquidMenuItems";
 export { Modal } from "./Modal";
 export { GlassCard } from "./GlassCard";
 export type { GlassShape } from "./GlassCard";
+export { GlassSidebar } from "./GlassSidebar";
+export type { GlassSidebarItem, GlassSidebarProps } from "./GlassSidebar";
+export { GlassList, GlassListItem } from "./GlassList";
+export { GlassSlider } from "./GlassSlider";
 export { GlassSwitch } from "./GlassSwitch";
 export {
   positionMenuGlass,

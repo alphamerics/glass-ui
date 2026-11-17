@@ -70,12 +70,45 @@
 
 /* Glass app base: transparent full-bleed document over the GPU surfaces. */
 :root {
-  color: #f7f9ff;
+  /* Shared gray palette — dark graphite theme, sampled from the macOS
+     System Settings reference. Every component reads these; hosts override
+     the variables (here or per-subtree) instead of hardcoding grays. */
+  --glass-bg-window: #1e2123; /* content area behind the cards */
+  --glass-bg-sidebar: #2c2f31; /* navigation column */
+  --glass-bg-card: #2a2d2f; /* grouped option cards */
+  --glass-bg-elevated: #3d4144; /* inputs, fields, raised chrome */
+  --glass-bg-hover: rgba(255, 255, 255, 0.07); /* row/button hover wash */
+  --glass-bg-active: rgba(255, 255, 255, 0.13); /* pressed / selected fills */
+  --glass-separator: rgba(255, 255, 255, 0.09); /* hairlines, dividers */
+  --glass-control-border: rgba(255, 255, 255, 0.14); /* button/field outlines */
+  --glass-control-border-strong: rgba(255, 255, 255, 0.4); /* rings, swatch edges */
+  --glass-text-primary: #f7f9f9;
+  --glass-text-secondary: rgba(255, 255, 255, 0.58); /* muted labels */
+  --glass-accent: #0a84ff; /* selection / controls blue */
+
+  color: var(--glass-text-primary);
   background: transparent;
   font-family: "SF Pro Display", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --glass-bg-window: #f5f5f7;
+    --glass-bg-sidebar: #e9e9eb;
+    --glass-bg-card: #ffffff;
+    --glass-bg-elevated: rgba(120, 120, 128, 0.14);
+    --glass-bg-hover: rgba(0, 0, 0, 0.06);
+    --glass-bg-active: rgba(0, 0, 0, 0.1);
+    --glass-separator: rgba(0, 0, 0, 0.12);
+    --glass-control-border: rgba(0, 0, 0, 0.14);
+    --glass-control-border-strong: rgba(0, 0, 0, 0.3);
+    --glass-text-primary: #1b1b1d;
+    --glass-text-secondary: rgba(0, 0, 0, 0.55);
+    --glass-accent: #007aff;
+  }
 }
 
 * {
@@ -388,4 +421,385 @@ button {
    transparent so the glass material shows instead of the white fill. */
 .glass-switch-thumb-glass {
   background: transparent;
+}
+
+/* ─── Glass input: the global pill-shaped text field. ───
+   Fully rounded (999px), SF Pro Display throughout. Compose it onto any
+   wrapper containing an <input> (and optional leading/trailing icons);
+   the sidebar search below is its first consumer. */
+.glass-input {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  background: var(--glass-input-bg, var(--glass-bg-elevated));
+  color: var(--glass-input-text, var(--glass-text-secondary));
+  font-family: "SF Pro Display", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  letter-spacing: 0.9px;
+  transition: background 160ms ease;
+}
+
+.glass-input:focus-within {
+  background: var(--glass-input-bg-focus, #484c50);
+}
+
+.glass-input > svg {
+  display: block; /* block-level so it centers vertically, not on the text baseline */
+  flex: 0 0 auto;
+}
+
+.glass-input input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  outline: none;
+  color: inherit;
+  font: inherit;
+}
+
+.glass-input input::placeholder {
+  color: inherit;
+}
+
+/* Replace the native WebKit clear button with the host's own X icon. */
+.glass-input input[type="search"]::-webkit-search-cancel-button,
+.glass-input input[type="search"]::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+
+@media (prefers-color-scheme: light) {
+  .glass-input {
+    --glass-input-bg-focus: rgba(120, 120, 128, 0.2);
+  }
+}
+
+/* ─── Glass sidebar: macOS System Settings-style navigation column. ───
+   A rounded search field on top, then groups of icon rows; the active row
+   is a filled accent pill and rows can carry a red trailing badge. No
+   window chrome. Hosts theme it by overriding the custom properties below
+   on an ancestor; the defaults here read the shared gray palette. */
+.glass-sidebar {
+  --glass-sidebar-width: 232px;
+  --glass-sidebar-bg: var(--glass-bg-sidebar);
+  --glass-sidebar-separator: var(--glass-separator);
+  --glass-sidebar-accent: var(--glass-accent);
+  --glass-sidebar-text: inherit;
+  --glass-sidebar-muted: var(--glass-text-secondary);
+  --glass-sidebar-hover: var(--glass-bg-hover);
+  --glass-sidebar-gap: 8px;
+  display: flex;
+  flex: 0 0 var(--glass-sidebar-width);
+  flex-direction: column;
+  gap: 2px;
+  margin: var(--glass-sidebar-gap);
+  padding: 14px 10px;
+  border-radius: 14px;
+  background: var(--glass-sidebar-bg);
+  box-shadow:
+    22px 0 56px -14px rgba(0, 0, 0, 0.35),
+    0 0 0 2px rgba(255, 255, 255, 0.2);
+  color: var(--glass-sidebar-text);
+  overflow: hidden;
+}
+
+/* The search field is the global glass input, sidebar-positioned. */
+.glass-sidebar-search {
+  flex: 0 0 auto;
+  height: 34px;
+  margin: 0 2px 10px;
+  cursor: default;
+}
+
+.glass-sidebar-search-clear {
+  display: grid;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.glass-sidebar-search-clear:hover {
+  background: rgba(127, 127, 127, 0.2);
+}
+
+.glass-sidebar-groups {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Hairline divider between groups, matching the system settings look. */
+.glass-sidebar-group + .glass-sidebar-group {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--glass-sidebar-separator);
+}
+
+.glass-sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.glass-sidebar-group-label {
+  padding: 0 8px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--glass-sidebar-muted);
+}
+
+.glass-sidebar-item {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  height: 32px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+
+.glass-sidebar-item:hover {
+  background: var(--glass-sidebar-hover);
+}
+
+.glass-sidebar-item[data-active="true"] {
+  background: var(--glass-sidebar-accent);
+  color: #ffffff;
+}
+
+.glass-sidebar-item:focus-visible {
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.35);
+}
+
+/* Icon tile: small, dark rounded square behind the row's icon with a
+   subtle light gray outline. */
+.glass-sidebar-item-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: linear-gradient(
+    to bottom,
+    #4a4d4f 0%,
+    #333638 55%,
+    #232527 100%
+  );
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
+.glass-sidebar-item[data-active="true"] .glass-sidebar-item-icon {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+
+.glass-sidebar-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.glass-sidebar-item-badge {
+  flex: 0 0 auto;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #ff453a;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 17px;
+  text-align: center;
+}
+
+.glass-sidebar-empty {
+  margin: 6px 8px;
+  font-size: 13px;
+  color: var(--glass-sidebar-muted);
+}
+
+@media (prefers-color-scheme: light) {
+  .glass-sidebar {
+    --glass-sidebar-text: var(--glass-text-primary);
+    --glass-sidebar-hover: rgba(0, 0, 0, 0.08);
+  }
+}
+
+/* ─── Glass list: grouped settings card. ───
+   A titled card of rows (GlassListItem) — label + detail text on the left,
+   controls on the right, hairlines between rows. All colors come from the
+   shared palette. */
+.glass-list-group {
+  margin-top: 18px;
+}
+
+.glass-list-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--glass-text-secondary);
+}
+
+.glass-list {
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--glass-bg-card);
+}
+
+.glass-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 46px;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+
+.glass-list-item + .glass-list-item {
+  border-top: 1px solid var(--glass-separator);
+}
+
+.glass-list-item[role="button"] {
+  cursor: pointer;
+}
+
+.glass-list-item[role="button"]:hover {
+  background: var(--glass-bg-hover);
+}
+
+.glass-list-item-leading {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.glass-list-item-text {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.glass-list-item-label {
+  flex: 0 1 auto;
+}
+
+.glass-list-item-detail {
+  font-size: 12px;
+  color: var(--glass-text-secondary);
+}
+
+.glass-list-item-trailing {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+/* ─── Glass slider: macOS-style slider. ───
+   Thin track with an accent fill and a wide white stadium thumb; optional
+   leading/trailing icons flank the track. Click anywhere to jump, drag to
+   change, full keyboard control. Colors come from the shared palette. */
+.glass-slider {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 10px;
+  height: 24px;
+  touch-action: none;
+  outline: none;
+}
+
+.glass-slider[aria-disabled="true"] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.glass-slider-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--glass-text-secondary);
+}
+
+.glass-slider-track {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--glass-bg-elevated);
+}
+
+.glass-slider-range {
+  position: absolute;
+  left: 0;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--glass-accent);
+}
+
+/* The resting thumb is a small white stadium (a slightly wide, fully
+   rounded rectangle); the held glass spawns at this size and tweens into
+   the big stadium (34x22, via GROW_SCALE). */
+.glass-slider-thumb {
+  position: absolute;
+  top: 50%;
+  width: 22px;
+  height: 16px;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+  cursor: grab;
+}
+
+/* The glass thumb must NOT use the CSS centering translate: the glass
+   tween owns the element's transform, and the moment the inline scale
+   lands the translate would drop, throwing the glass off center. It is
+   positioned by explicit left/top instead (left set inline to
+   centerX - THUMB_W/2; vertical via the half-height margin). The wrapper
+   must also stay TRANSPARENT — like the switch's thumb — so the native
+   glass shows instead of the thumb's white fill. */
+.glass-slider-thumb-glass {
+  top: calc(50% - 8px);
+  transform: none;
+  background: transparent;
+  box-shadow: none;
+  cursor: grabbing;
+}
+
+.glass-slider:focus-visible .glass-slider-thumb {
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--glass-accent) 45%, transparent),
+    0 1px 4px rgba(0, 0, 0, 0.35);
 }
